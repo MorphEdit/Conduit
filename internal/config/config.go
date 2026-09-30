@@ -33,8 +33,8 @@ type Config struct {
 }
 
 type SequenceConfig struct {
-	Offset int64 `yaml:"offset"`
-	Step   int64 `yaml:"step"`
+	Offset int64 `yaml:"offset" json:"offset"`
+	Step   int64 `yaml:"step" json:"step"`
 }
 
 type TablePolicy struct {

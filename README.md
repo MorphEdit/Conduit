@@ -14,7 +14,8 @@ Conduit แค่คอยดูว่ามีอะไรเปลี่ยน
 | 2 | ซิงก์สองทาง/หลายไซต์, กันซิงก์วน, แยกเลข ID ตามไซต์ | ✅ |
 | 3 | last-write-wins, tombstone, ตาราง owner-only, บันทึก conflict | ✅ |
 | 4 | node ใหม่เข้าร่วมด้วย snapshot | ✅ |
-| 5 | ชุดทดสอบตัดเน็ตจริง 3 ไซต์ (34 checks) | ✅ |
+| 5 | ชุดทดสอบตัดเน็ตจริง 3 ไซต์ | ✅ |
+| + | Dashboard แบบ isometric | ✅ |
 
 ## ภาพรวม
 
@@ -109,11 +110,25 @@ peers:
   - { id: branch, url: http://conduit-branch:7420 }
 ```
 
+## Dashboard
+
+เปิด `http://<conduit>:7420/` ได้จากทุกไซต์ จะเห็นผัง isometric ของทุกไซต์ พร้อมเส้นซิงก์ที่อัปเดตทุก 2 วินาที
+
+- แต่ละไซต์แสดง Postgres + Conduit และเส้น capture ระหว่างสองตัว
+- สีเส้น: เขียว = ซิงก์แล้ว, ส้ม = มีคิวรอส่ง, ส้มประ = กำลัง retry, แดงประ = ขาดการเชื่อมต่อ
+- คลิกไซต์เพื่อดูคิว, backlog ต่อ peer, error ล่าสุด และ conflict
+- เปิดไฟล์ตรงๆ หรือใส่ `?demo` จะเห็นข้อมูลตัวอย่าง (จำลอง local เน็ตหลุดทุก 20 วินาที)
+
+ข้อมูลมาจาก `GET /v1/mesh` ซึ่งรวม `/status` ของไซต์ตัวเองกับทุก peer
+`/`, `/status` และ `/v1/mesh` ไม่ต้องใช้ token ถ้าเปิดพอร์ตออกอินเทอร์เน็ตควรมี reverse proxy ที่ใส่ auth ไว้หน้า
+
 ## HTTP
 
 | Endpoint | ใช้ทำอะไร |
 |---|---|
+| `GET /` | dashboard |
 | `GET /health` | ใช้ตรวจว่ายังทำงานอยู่ |
+| `GET /v1/mesh` | สถานะของทุกไซต์รวมกัน (ใช้โดย dashboard) |
 | `GET /status` | capture, คิว, backlog ต่อ peer, ข้อมูลที่รับแล้ว, conflict ล่าสุด |
 | `POST /v1/apply` | peer ส่ง change มา (ต้องมี token) |
 | `GET /v1/snapshot` | ไซต์ใหม่ดึงข้อมูลทั้งหมด (ต้องมี token) |
@@ -142,6 +157,7 @@ test bench มี 3 ไซต์ แต่ละไซต์มี network ข�
 | 9 | ปิด Conduit / Postgres แต่ละฝั่ง |
 | 10 | ไซต์ที่ 3 เข้าร่วมด้วย snapshot → ซิงก์สามทาง, ไม่มี conflict ปลอม |
 | 11 | ส่ง seq เก่าซ้ำ, token ผิด |
+| 12 | dashboard และ `/v1/mesh` (รวมถึงตอนมีไซต์ขาด) |
 
 ## ข้อกำหนดของ Postgres
 
@@ -173,6 +189,6 @@ internal/sender/     ส่ง outbox ไปหา peer แต่ละตัว
 internal/apply/      เขียน change ของ peer + last-write-wins
 internal/policy/     จัด sequence ตามไซต์, trigger owner-only
 internal/snapshot/   ส่ง/รับ snapshot
-internal/server/     HTTP
+internal/server/     HTTP + dashboard (ui/ ฝังในไฟล์ binary)
 scripts/test.ps1     ชุดทดสอบ end-to-end
 ```

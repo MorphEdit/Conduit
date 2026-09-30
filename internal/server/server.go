@@ -2,10 +2,15 @@
 package server
 
 import (
+	"context"
 	"crypto/subtle"
+	"embed"
 	"encoding/json"
+	"io/fs"
 	"log/slog"
 	"net/http"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/conduit-sync/conduit/internal/apply"
@@ -18,6 +23,11 @@ import (
 )
 
 const maxBody = 64 << 20
+
+// The dashboard served at "/".
+//
+//go:embed ui
+var uiFiles embed.FS
 
 type Server struct {
 	cfg     *config.Config
@@ -39,6 +49,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /status", s.status)
 	mux.HandleFunc("POST /v1/apply", s.apply)
 	mux.HandleFunc("GET /v1/snapshot", s.snapshot)
+	mux.HandleFunc("GET /v1/mesh", s.mesh)
+	ui, _ := fs.Sub(uiFiles, "ui")
+	mux.Handle("GET /", http.FileServerFS(ui))
 	return mux
 }
 
@@ -84,13 +97,17 @@ func (s *Server) apply(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
-	out := map[string]any{"node_id": s.cfg.NodeID, "time": time.Now()}
+	writeJSON(w, s.statusData(r.Context()))
+}
+
+func (s *Server) statusData(ctx context.Context) map[string]any {
+	out := map[string]any{"node_id": s.cfg.NodeID, "time": time.Now(), "sequences": s.cfg.Sequences}
 	if s.capture != nil {
 		out["capture"] = s.capture.Status()
 	} else {
 		out["capture"] = capture.Status{Enabled: false}
 	}
-	ob, err := s.store.OutboxStats(r.Context())
+	ob, err := s.store.OutboxStats(ctx)
 	if err != nil {
 		out["error"] = err.Error()
 	}
@@ -102,13 +119,59 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		peers[i] = p
 	}
 	out["peers"] = peers
-	if inbox, err := s.store.InboxStates(r.Context()); err == nil {
+	if inbox, err := s.store.InboxStates(ctx); err == nil {
 		out["inbox"] = inbox
 	}
-	if c, err := s.store.Conflicts(r.Context(), 10); err == nil {
+	if c, err := s.store.Conflicts(ctx, 10); err == nil {
 		out["conflicts"] = c
 	}
-	writeJSON(w, out)
+	owners := map[string]string{}
+	for name, p := range s.cfg.Tables {
+		if p.Owner != "" {
+			owners[name] = p.Owner
+		}
+	}
+	out["owners"] = owners
+	return out
+}
+
+type meshNode struct {
+	ID        string         `json:"id"`
+	Self      bool           `json:"self"`
+	Reachable bool           `json:"reachable"`
+	Error     string         `json:"error,omitempty"`
+	Status    map[string]any `json:"status,omitempty"`
+}
+
+// mesh returns this node's status plus every peer's, fetched in parallel,
+// so the dashboard can draw the whole network from any one site.
+func (s *Server) mesh(w http.ResponseWriter, r *http.Request) {
+	nodes := make([]meshNode, len(s.cfg.Peers)+1)
+	nodes[0] = meshNode{ID: s.cfg.NodeID, Self: true, Reachable: true, Status: s.statusData(r.Context())}
+	var wg sync.WaitGroup
+	for i, p := range s.cfg.Peers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			n := meshNode{ID: p.ID}
+			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			defer cancel()
+			req, _ := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(p.URL, "/")+"/status", nil)
+			resp, err := http.DefaultClient.Do(req)
+			if err == nil {
+				err = json.NewDecoder(resp.Body).Decode(&n.Status)
+				resp.Body.Close()
+			}
+			if err != nil {
+				n.Error = err.Error()
+			} else {
+				n.Reachable = true
+			}
+			nodes[i+1] = n
+		}()
+	}
+	wg.Wait()
+	writeJSON(w, map[string]any{"self": s.cfg.NodeID, "time": time.Now(), "nodes": nodes})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

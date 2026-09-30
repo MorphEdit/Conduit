@@ -243,6 +243,19 @@ $code = try { Invoke-WebRequest "http://127.0.0.1:7421/v1/snapshot" -UseBasicPar
 Check ($code -eq 401) "snapshot needs the token ($code)"
 
 # ---------------------------------------------------------------------------
+Section "12. dashboard"
+$page = Invoke-WebRequest "http://127.0.0.1:7420/" -UseBasicParsing
+Check ($page.StatusCode -eq 200 -and $page.Content -match 'Conduit') 'dashboard served at /'
+$mesh = Invoke-RestMethod "http://127.0.0.1:7422/v1/mesh"
+$up = @($mesh.nodes | Where-Object reachable).Count
+Check ($mesh.nodes.Count -eq 3 -and $up -eq 3) "mesh from branch sees all 3 sites ($up/$($mesh.nodes.Count) reachable)"
+CutWan local
+$mesh = Invoke-RestMethod "http://127.0.0.1:7420/v1/mesh"
+$localNode = $mesh.nodes | Where-Object id -eq 'local'
+Check (-not $localNode.reachable) 'mesh marks a cut site unreachable'
+HealWan local
+
+# ---------------------------------------------------------------------------
 Write-Host ""
 foreach ($n in $script:nodes) {
     $s = Status $n

@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Conduit — Sync Mesh</title>
+<meta name="description" content="แผงสถานะ Conduit: ดูการซิงก์ข้อมูลระหว่างทุกไซต์แบบสด">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a1014'/%3E%3Cpath d='M22 10a8 8 0 1 0 0 12' stroke='%235de0c8' stroke-width='3' fill='none'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="./" aria-label="Conduit หน้าแรก"><span class="brand-mark">C</span>CONDUIT<span class="brand-suffix" id="self-node">/ —</span></a>
+  <span class="top-caption">MULTI-SITE SYNC</span>
+  <span class="mode" id="mode">CONNECTING</span>
+</header>
+
+<main>
+  <div class="intro">
+    <div>
+      <p class="eyebrow">01 / TOPOLOGY</p>
+      <h1>Every site, in sync<span>.</span></h1>
+      <p class="subtitle">ข้อมูลไหลถึงกันทุกไซต์ แม้เน็ตจะหลุด</p>
+    </div>
+    <div class="scene-caption">
+      <span class="status-dot" id="pulse"></span><span id="summary">กำลังเชื่อมต่อ…</span>
+      <span class="caption-small" id="updated">—</span>
+    </div>
+  </div>
+
+  <section class="experience" aria-label="ผังการเชื่อมต่อของทุกไซต์">
+    <div class="stage" id="stage">
+      <svg class="scene" id="scene" viewBox="0 0 1536 1024" role="img" aria-label="ผัง isometric ของไซต์และเส้นซิงก์">
+        <defs>
+          <filter id="glow" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="5"/></filter>
+          <filter id="soft" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="18"/></filter>
+          <radialGradient id="floor-fade" cx="50%" cy="52%" r="55%">
+            <stop offset="0" stop-color="#1a2429"/><stop offset="1" stop-color="#111619" stop-opacity="0"/>
+          </radialGradient>
+        </defs>
+        <ellipse cx="768" cy="560" rx="760" ry="430" fill="url(#floor-fade)"/>
+        <g id="grid"></g>
+        <g id="links"></g>
+        <g id="sites"></g>
+      </svg>
+      <div class="hotspots" id="hotspots"></div>
+      <div class="legend" aria-label="ความหมายของสีเส้น">
+        <span><i class="ok"></i>ซิงก์แล้ว</span>
+        <span><i class="busy"></i>มีคิวรอส่ง</span>
+        <span><i class="warn"></i>กำลัง retry</span>
+        <span><i class="down"></i>ขาดการเชื่อมต่อ</span>
+      </div>
+      <button class="motion-button" id="motion" type="button" aria-pressed="false">
+        <span class="pause-symbol" aria-hidden="true">Ⅱ</span><span id="motion-label">หยุดการเคลื่อนไหว</span>
+      </button>
+    </div>
+  </section>
+
+  <section class="controls" aria-label="เลือกไซต์">
+    <div class="control-heading"><span>ไซต์ทั้งหมด</span><span>เลือกจุดบนภาพหรือไซต์ด้านล่าง</span></div>
+    <div class="site-list" id="site-list"></div>
+
+    <div class="detail" aria-live="polite">
+      <div class="selected-name">
+        <span class="status-dot" id="detail-dot"></span><strong id="detail-title">—</strong>
+        <span class="pill" id="detail-state">—</span>
+      </div>
+      <dl>
+        <div><dt>OUTBOX</dt><dd id="m-outbox">—</dd></div>
+        <div><dt>CAPTURED</dt><dd id="m-captured">—</dd></div>
+        <div><dt>CONFLICTS</dt><dd id="m-conflicts">—</dd></div>
+        <div><dt>ID OFFSET</dt><dd id="m-offset">—</dd></div>
+      </dl>
+    </div>
+
+    <div class="panels">
+      <div class="panel">
+        <h2>เส้นเชื่อมต่อ <span id="links-for"></span></h2>
+        <ul class="link-rows" id="link-rows"></ul>
+      </div>
+      <div class="panel">
+        <h2>Conflict ล่าสุด</h2>
+        <ul class="conflict-rows" id="conflict-rows"></ul>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer><span>CONDUIT / POSTGRES MULTI-SITE SYNC</span><span id="footer-note">isometric view · live status</span></footer>
+<script src="app.js"></script>
+</body>
+</html>
