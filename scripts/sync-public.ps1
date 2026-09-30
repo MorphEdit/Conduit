@@ -28,7 +28,7 @@ try {
     git add -A
     if (git status --porcelain) {
         git commit -m $Message
-        git push
+        git push -u origin HEAD:main
     } else {
         Write-Host 'public repository already up to date'
     }
