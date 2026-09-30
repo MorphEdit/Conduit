@@ -78,10 +78,7 @@ func (s *Server) joinPoll(w http.ResponseWriter, r *http.Request) {
 }
 
 // schema returns this site's table definitions for a new, empty site.
-func (s *Server) schema(w http.ResponseWriter, r *http.Request) {
-	if !s.clusterAuth(w, r) {
-		return
-	}
+func (s *Server) schema(w http.ResponseWriter, r *http.Request, _ string) {
 	args := []string{"--schema-only", "--no-owner", "--no-privileges", "--no-publications", "--no-subscriptions"}
 	for _, sc := range s.cfg.Capture.Schemas {
 		args = append(args, "--schema="+sc)
@@ -108,7 +105,7 @@ func (s *Server) createInvite(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	code, exp, err := cluster.CreateInvite(r.Context(), v.Store.Pool(), s.cfg.Advertise, inviteTTL)
+	code, exp, err := cluster.CreateInvite(r.Context(), v.Store.Pool(), s.cfg.Advertise, v.TLS.Fingerprint, inviteTTL)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -127,7 +124,7 @@ func (s *Server) decide(w http.ResponseWriter, r *http.Request) {
 	switch decision {
 	case "approve":
 		var code string
-		if code, _, err = cluster.CreateInvite(r.Context(), v.Store.Pool(), s.cfg.Advertise, time.Hour); err == nil {
+		if code, _, err = cluster.CreateInvite(r.Context(), v.Store.Pool(), s.cfg.Advertise, v.TLS.Fingerprint, time.Hour); err == nil {
 			err = s.rt.Requests.Decide(id, true, code)
 		}
 	case "reject":

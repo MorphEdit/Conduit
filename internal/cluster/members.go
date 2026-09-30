@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -20,11 +21,12 @@ import (
 // DefaultStep leaves room for 10 sites: site n generates ids ending in n.
 const DefaultStep = 10
 
-// Identity is this site's row in conduit.node.
+// Identity is this site's row in conduit.node. Secret is this site's own
+// credential; other sites only know its hash.
 type Identity struct {
 	ID        string
 	ClusterID string
-	Token     string
+	Secret    string
 	Offset    int64
 	Step      int64
 	Ready     bool
@@ -35,6 +37,8 @@ type Member struct {
 	URL       string    `json:"url"`
 	Offset    int64     `json:"offset"`
 	Status    string    `json:"status"` // active | removed
+	KeyHash   string    `json:"key_hash"`
+	CertFP    string    `json:"cert_fp"`
 	JoinedAt  time.Time `json:"joined_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -63,7 +67,7 @@ func LoadIdentity(ctx context.Context, pool *pgxpool.Pool) (*Identity, error) {
 	var id Identity
 	err := pool.QueryRow(ctx,
 		`SELECT id, cluster_id, token, id_offset, id_step, ready FROM conduit.node`).
-		Scan(&id.ID, &id.ClusterID, &id.Token, &id.Offset, &id.Step, &id.Ready)
+		Scan(&id.ID, &id.ClusterID, &id.Secret, &id.Offset, &id.Step, &id.Ready)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -75,18 +79,19 @@ func SaveIdentity(ctx context.Context, pool *pgxpool.Pool, id *Identity) error {
 		INSERT INTO conduit.node (id, cluster_id, token, id_offset, id_step, ready) VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (singleton) DO UPDATE SET id = EXCLUDED.id, cluster_id = EXCLUDED.cluster_id,
 			token = EXCLUDED.token, id_offset = EXCLUDED.id_offset, id_step = EXCLUDED.id_step, ready = EXCLUDED.ready`,
-		id.ID, id.ClusterID, id.Token, id.Offset, id.Step, id.Ready)
+		id.ID, id.ClusterID, id.Secret, id.Offset, id.Step, id.Ready)
 	return err
 }
 
+// NewSecret returns a fresh per-site credential.
+func NewSecret() string { return randomHex(24) }
+
 // Found creates a brand-new cluster with this site as its first member.
-func Found(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config) (*Identity, error) {
-	id := &Identity{ID: cfg.NodeID, ClusterID: randomHex(8), Token: cfg.Token, Offset: 1, Step: DefaultStep, Ready: true}
-	if id.Token == "" {
-		id.Token = randomHex(24)
-	}
+func Found(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config, certFP string) (*Identity, error) {
+	id := &Identity{ID: cfg.NodeID, ClusterID: randomHex(8), Secret: NewSecret(), Offset: 1, Step: DefaultStep, Ready: true}
 	now := time.Now()
-	if err := UpsertMembers(ctx, pool, []Member{{ID: id.ID, URL: cfg.Advertise, Offset: 1, Status: "active", JoinedAt: now, UpdatedAt: now}}); err != nil {
+	self := Member{ID: id.ID, URL: cfg.Advertise, Offset: 1, Status: "active", KeyHash: hashSecret(id.Secret), CertFP: certFP, JoinedAt: now, UpdatedAt: now}
+	if err := UpsertMembers(ctx, pool, []Member{self}); err != nil {
 		return nil, err
 	}
 	if err := PutSetting(ctx, pool, "step", DefaultStep); err != nil {
@@ -97,14 +102,29 @@ func Found(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config) (*Identi
 
 // Members returns every known member (active and removed).
 func Members(ctx context.Context, pool *pgxpool.Pool) ([]Member, error) {
-	rows, err := pool.Query(ctx, `SELECT id, url, id_offset, status, joined_at, updated_at FROM conduit.members ORDER BY id_offset, id`)
+	rows, err := pool.Query(ctx, `SELECT id, url, id_offset, status, key_hash, cert_fp, joined_at, updated_at
+		FROM conduit.members ORDER BY id_offset, id`)
 	if err != nil {
 		return nil, err
 	}
 	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (Member, error) {
 		var m Member
-		return m, r.Scan(&m.ID, &m.URL, &m.Offset, &m.Status, &m.JoinedAt, &m.UpdatedAt)
+		return m, r.Scan(&m.ID, &m.URL, &m.Offset, &m.Status, &m.KeyHash, &m.CertFP, &m.JoinedAt, &m.UpdatedAt)
 	})
+}
+
+// ErrUnknownSite means a request's credentials match no active member.
+var ErrUnknownSite = errors.New("unknown, removed or wrongly authenticated site")
+
+// Authenticate checks a site's id and secret against the member list.
+// Removed members fail immediately, which is how removal revokes access.
+func Authenticate(ctx context.Context, pool *pgxpool.Pool, id, secret string) error {
+	var keyHash string
+	err := pool.QueryRow(ctx, `SELECT key_hash FROM conduit.members WHERE id = $1 AND status = 'active'`, id).Scan(&keyHash)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && (keyHash == "" || !secretMatches(secret, keyHash))) {
+		return ErrUnknownSite
+	}
+	return err
 }
 
 // UpsertMembers stores members, keeping whichever version is newer.
@@ -121,11 +141,13 @@ func mergeMembers(ctx context.Context, pool *pgxpool.Pool, ms []Member) (bool, e
 			continue
 		}
 		tag, err := pool.Exec(ctx, `
-			INSERT INTO conduit.members (id, url, id_offset, status, joined_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6)
-			ON CONFLICT (id) DO UPDATE SET url = EXCLUDED.url, id_offset = EXCLUDED.id_offset,
-				status = EXCLUDED.status, joined_at = EXCLUDED.joined_at, updated_at = EXCLUDED.updated_at
+			INSERT INTO conduit.members (id, url, id_offset, status, key_hash, cert_fp, joined_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			ON CONFLICT (id) DO UPDATE SET url = EXCLUDED.url, id_offset = EXCLUDED.id_offset, status = EXCLUDED.status,
+				key_hash = EXCLUDED.key_hash, cert_fp = EXCLUDED.cert_fp,
+				joined_at = EXCLUDED.joined_at, updated_at = EXCLUDED.updated_at
 			WHERE conduit.members.updated_at < EXCLUDED.updated_at`,
-			m.ID, m.URL, m.Offset, m.Status, m.JoinedAt, m.UpdatedAt)
+			m.ID, m.URL, m.Offset, m.Status, m.KeyHash, m.CertFP, m.JoinedAt, m.UpdatedAt)
 		if err != nil {
 			return changed, err
 		}
@@ -205,7 +227,8 @@ func TablesSetting(ctx context.Context, pool *pgxpool.Pool) (map[string]config.T
 // allocate picks the lowest offset never used by any member (removed
 // members keep theirs: rows they created still carry those ids) and adds
 // the new member, all under a table lock so two joins cannot collide here.
-func allocate(ctx context.Context, pool *pgxpool.Pool, id, url string, step int64) (int64, error) {
+func allocate(ctx context.Context, pool *pgxpool.Pool, req JoinRequest, step int64) (int64, error) {
+	id := req.ID
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return 0, err
@@ -246,14 +269,23 @@ func allocate(ctx context.Context, pool *pgxpool.Pool, id, url string, step int6
 	}
 	now := time.Now()
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO conduit.members (id, url, id_offset, status, joined_at, updated_at) VALUES ($1, $2, $3, 'active', $4, $4)`,
-		id, url, offset, now); err != nil {
+		`INSERT INTO conduit.members (id, url, id_offset, status, key_hash, cert_fp, joined_at, updated_at)
+		 VALUES ($1, $2, $3, 'active', $4, $5, $6, $6)`,
+		id, strings.TrimRight(req.URL, "/"), offset, req.KeyHash, req.CertFP, now); err != nil {
 		return 0, err
 	}
 	return offset, tx.Commit(ctx)
 }
 
 var ErrNameTaken = errors.New("site name already used in this cluster")
+
+// WasRemoved reports whether id/secret belong to a member that has been
+// removed, so it can be told to stop instead of just being refused.
+func WasRemoved(ctx context.Context, pool *pgxpool.Pool, id, secret string) bool {
+	var keyHash string
+	err := pool.QueryRow(ctx, `SELECT key_hash FROM conduit.members WHERE id = $1 AND status = 'removed'`, id).Scan(&keyHash)
+	return err == nil && keyHash != "" && secretMatches(secret, keyHash)
+}
 
 // Remove marks a member removed; the change spreads by gossip.
 func Remove(ctx context.Context, pool *pgxpool.Pool, id string) error {

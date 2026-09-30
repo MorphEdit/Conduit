@@ -13,6 +13,8 @@ $OutputEncoding = [Text.UTF8Encoding]::new($false)
 $tables = @('customers', 'quotations', 'quotation_items', 'stock_lots')
 $ports = @{ host = 7420; local = 7421; branch = 7422 }
 $adminPw = if ($env:CONDUIT_ADMIN_PASSWORD) { $env:CONDUIT_ADMIN_PASSWORD } else { 'admin' }
+$peerPorts = @{ host = 7440; local = 7441; branch = 7442 }
+$tmp = Join-Path $env:TEMP 'conduit-test'; New-Item -ItemType Directory -Force $tmp | Out-Null
 $script:nodes = @('host', 'local')
 $script:passed = 0
 $script:failed = 0
@@ -81,6 +83,25 @@ function WaitPhase([string]$node, [string]$phase, [int]$timeoutSec = 120) {
     return $null
 }
 
+# Call a site's peer port (HTTPS, self-signed: -k) with curl.exe.
+# Returns the HTTP status code; the body is left in $script:peerBody.
+function PeerCall([string]$node, [string]$method, [string]$path, [string]$auth = '', $body = $null, [switch]$Plain) {
+    $scheme = if ($Plain) { 'http' } else { 'https' }
+    $out = Join-Path $tmp 'resp.txt'; Remove-Item $out -ErrorAction SilentlyContinue
+    $a = @('-sk', '--max-time', '10', '-o', $out, '-w', '%{http_code}', '-X', $method)
+    if ($auth) { $a += @('-H', "Authorization: $auth") }
+    if ($null -ne $body) {
+        $f = Join-Path $tmp 'body.json'
+        [IO.File]::WriteAllText($f, ($body | ConvertTo-Json -Depth 10), [Text.UTF8Encoding]::new($false))
+        $a += @('-H', 'Content-Type: application/json', '--data-binary', "@$f")
+    }
+    $code = & curl.exe @a "${scheme}://127.0.0.1:$($peerPorts[$node])$path"
+    $script:peerBody = if (Test-Path $out) { Get-Content $out -Raw -Encoding UTF8 } else { '' }
+    return [int]$code
+}
+
+function Creds([string]$node) { "Conduit " + (Sql $node "SELECT id || ':' || token FROM conduit.node") }
+
 # POST an admin action; returns the HTTP status code.
 function Admin([string]$node, [string]$path, [string]$password = $adminPw, $body = $null) {
     $h = @{ 'X-Admin-Password' = $password }
@@ -114,9 +135,13 @@ $hostPeers = @((Status host).peers | ForEach-Object id)
 Check ($hostPeers -contains 'local') 'host started syncing to local by itself (no config edit, no restart)'
 $inv = $invite.Substring(5).Replace('-', '+').Replace('_', '/'); while ($inv.Length % 4) { $inv += '=' }
 $secret = ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($inv)) | ConvertFrom-Json).s
-$code = try { Invoke-WebRequest "http://127.0.0.1:7420/v1/join" -Method Post -ContentType 'application/json' -UseBasicParsing `
-    -Body (@{ secret = $secret; id = 'intruder'; url = 'http://x:1' } | ConvertTo-Json) | Out-Null; 200 } catch { [int]$_.Exception.Response.StatusCode }
+$code = PeerCall host POST '/v1/join' '' @{ secret = $secret; id = 'intruder'; url = 'https://x:1'; key_hash = 'x'; cert_fp = 'x' }
 Check ($code -eq 403) "used invite cannot be used again ($code)"
+$fp = (Status host).fingerprint
+$inviteFp = ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($inv)) | ConvertFrom-Json).f
+Check ($fp.Length -eq 64 -and $inviteFp -eq $fp) 'invite pins host''s TLS certificate fingerprint'
+$memberFp = Sql local "SELECT cert_fp FROM conduit.members WHERE id = 'host'"
+Check ($memberFp -eq $fp) 'local learned host''s fingerprint for pinning'
 
 # ---------------------------------------------------------------------------
 Section "1. host -> local, every column type"
@@ -279,18 +304,25 @@ $spurious = Sql branch "SELECT count(*) FROM conduit.conflicts"
 Check ($spurious -eq '0') "no spurious conflicts on the new site ($spurious)"
 
 # ---------------------------------------------------------------------------
-Section "11. protocol safety"
+Section "11. security: TLS + per-site credentials"
+$code = PeerCall local GET '/health' -Plain
+Check ($code -ne 200) "peer port refuses plain HTTP ($code)"
+Check ((PeerCall local GET '/health') -eq 200) 'peer port answers over TLS'
+$hostAuth = Creds host
+$localAuth = Creds local
 $before = [int](Sql local "SELECT applied_seq FROM conduit.inbox_state WHERE origin = 'host'")
-$token = Sql local "SELECT token FROM conduit.node"
 $batch = @{ origin = 'host'; txs = @(@{ seq = 1; lsn = '0/0'; commit_time = (Get-Date).ToString('o'); changes = @(
     @{ op = 'I'; s = 'public'; t = 'customers'; new = @(@{ n = 'id'; k = $true; v = '999999' }, @{ n = 'name'; v = 'replayed-must-not-appear' }) }) }) }
-$ack = Invoke-RestMethod "http://127.0.0.1:7421/v1/apply" -Method Post -ContentType 'application/json' `
-    -Headers @{ Authorization = "Bearer $token" } -Body ($batch | ConvertTo-Json -Depth 10)
-Check ($ack.applied -eq $before -and (Sql local "SELECT count(*) FROM customers WHERE id = 999999") -eq '0') "replayed old seq is skipped (applied stays $before)"
-$code = try { Invoke-WebRequest "http://127.0.0.1:7421/v1/apply" -Method Post -Body '{}' -Headers @{ Authorization = 'Bearer wrong' } -UseBasicParsing | Out-Null; 200 } catch { [int]$_.Exception.Response.StatusCode }
-Check ($code -eq 401) "wrong token rejected ($code)"
-$code = try { Invoke-WebRequest "http://127.0.0.1:7421/v1/snapshot" -UseBasicParsing | Out-Null; 200 } catch { [int]$_.Exception.Response.StatusCode }
-Check ($code -eq 401) "snapshot needs the token ($code)"
+$code = PeerCall local POST '/v1/apply' $hostAuth $batch
+$ack = $script:peerBody | ConvertFrom-Json
+Check ($code -eq 200 -and $ack.applied -eq $before -and (Sql local "SELECT count(*) FROM customers WHERE id = 999999") -eq '0') "replayed old seq is skipped (applied stays $before)"
+Check ((PeerCall local POST '/v1/apply' 'Conduit host:wrong-secret' $batch) -eq 401) 'wrong secret rejected'
+Check ((PeerCall local POST '/v1/apply' 'Bearer anything' $batch) -eq 401) 'old shared-token style rejected'
+Check ((PeerCall host POST '/v1/apply' $localAuth $batch) -eq 403) 'a site cannot send changes pretending to be another site'
+Check ((PeerCall local GET '/v1/snapshot') -eq 401) 'snapshot needs credentials'
+Check ((PeerCall local GET '/v1/members') -eq 401) 'member list needs credentials'
+Check ((PeerCall host GET '/v1/members' $localAuth) -eq 200) 'active member can read the member list'
+Check ((Sql host "SELECT count(*) FROM conduit.members WHERE key_hash = '' OR cert_fp = ''") -eq '0') 'every member has its own key hash and certificate pin'
 
 # ---------------------------------------------------------------------------
 Section "12. dashboard"
@@ -307,11 +339,17 @@ HealWan local
 
 # ---------------------------------------------------------------------------
 Section "13. remove a site"
+$branchAuth = Creds branch
+Check ((PeerCall host GET '/v1/members' $branchAuth) -eq 200) 'branch credentials work before removal'
 Check ((Admin host '/v1/admin/members/branch/remove') -eq 204) 'admin removed branch on host'
 Start-Sleep 15
 $hp = @((Status host).peers | ForEach-Object id); $lp = @((Status local).peers | ForEach-Object id)
 Check (-not ($hp -contains 'branch') -and -not ($lp -contains 'branch')) 'host and local stopped syncing to branch'
 Check ((Status branch).removed -eq $true) 'branch knows it was removed'
+Check ((PeerCall host GET '/v1/members' $branchAuth) -eq 403) 'host refuses branch''s credentials right away (and tells it why)'
+Check ((PeerCall local GET '/v1/members' $branchAuth) -eq 403) 'local refuses branch''s credentials too (learned by gossip)'
+Check ((PeerCall local POST '/v1/apply' $branchAuth @{ origin = 'branch'; txs = @() }) -eq 403) 'removed site can no longer push changes'
+Check ((PeerCall local POST '/v1/apply' 'Conduit branch:not-its-secret' @{ origin = 'branch'; txs = @() }) -eq 401) 'someone without branch''s secret just gets 401'
 Check ((Sql host "SELECT count(*) FROM conduit.peer_cursor WHERE peer_id = 'branch'") -eq '0') 'branch no longer holds back the outbox'
 $script:nodes = @('host', 'local')
 Sql host "INSERT INTO customers (code, name) VALUES ('AFTER-REMOVE', 'x')" | Out-Null

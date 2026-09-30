@@ -17,6 +17,7 @@ import (
 
 	"github.com/conduit-sync/conduit/internal/change"
 	"github.com/conduit-sync/conduit/internal/config"
+	"github.com/conduit-sync/conduit/internal/peer"
 	"github.com/conduit-sync/conduit/internal/store"
 )
 
@@ -40,33 +41,32 @@ type Status struct {
 type Peer struct {
 	ID  string
 	URL string
+	FP  string // pinned certificate fingerprint
 }
 
 type Sender struct {
 	peer      Peer
 	nodeID    string
-	token     string
+	creds     peer.Credentials
 	retention time.Duration
 	store     *store.Store
 	wake      <-chan struct{}
-	client    *http.Client
 	log       *slog.Logger
 
 	mu sync.Mutex
 	st Status
 }
 
-func New(cfg *config.Config, peer Peer, st *store.Store, wake <-chan struct{}, log *slog.Logger) *Sender {
+func New(cfg *config.Config, p Peer, creds peer.Credentials, st *store.Store, wake <-chan struct{}, log *slog.Logger) *Sender {
 	return &Sender{
-		peer:      peer,
+		peer:      p,
 		nodeID:    cfg.NodeID,
-		token:     cfg.Token,
+		creds:     creds,
 		retention: cfg.OutboxRetention,
 		store:     st,
 		wake:      wake,
-		client:    &http.Client{Timeout: requestLimit},
-		log:       log.With("component", "sender", "peer", peer.ID),
-		st:        Status{ID: peer.ID, URL: peer.URL},
+		log:       log.With("component", "sender", "peer", p.ID),
+		st:        Status{ID: p.ID, URL: p.URL},
 	}
 }
 
@@ -144,15 +144,8 @@ func (s *Sender) send(ctx context.Context, txs []change.Tx) (change.Ack, error) 
 	if err != nil {
 		return change.Ack{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		strings.TrimRight(s.peer.URL, "/")+"/v1/apply", bytes.NewReader(body))
-	if err != nil {
-		return change.Ack{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+s.token)
-
-	resp, err := s.client.Do(req)
+	resp, err := peer.Do(ctx, peer.Target{URL: s.peer.URL, Fingerprint: s.peer.FP}, s.creds,
+		http.MethodPost, "/v1/apply", bytes.NewReader(body), requestLimit)
 	if err != nil {
 		return change.Ack{}, err
 	}

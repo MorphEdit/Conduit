@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -12,11 +13,17 @@ import (
 
 	"github.com/conduit-sync/conduit/internal/config"
 	"github.com/conduit-sync/conduit/internal/notify"
+	"github.com/conduit-sync/conduit/internal/peer"
 	"github.com/conduit-sync/conduit/internal/sender"
 	"github.com/conduit-sync/conduit/internal/store"
 )
 
 const gossipInterval = 10 * time.Second
+
+// RemovedHeader marks a 403 that means "your site was removed from the cluster".
+const RemovedHeader = "X-Conduit-Removed"
+
+var errRemoved = errors.New("this site was removed from the cluster")
 
 // Manager keeps the member list in step with the other sites and runs one
 // sender per active member, starting and stopping them as sites come and go.
@@ -27,7 +34,7 @@ type Manager struct {
 	bus        *notify.Bus
 	log        *slog.Logger
 	onSettings func(context.Context)
-	client     *http.Client
+	creds      peer.Credentials
 	trigger    chan struct{}
 
 	mu      sync.Mutex
@@ -37,7 +44,7 @@ type Manager struct {
 
 type running struct {
 	s      *sender.Sender
-	url    string
+	peer   sender.Peer
 	cancel context.CancelFunc
 }
 
@@ -45,7 +52,7 @@ func NewManager(cfg *config.Config, id *Identity, st *store.Store, bus *notify.B
 	return &Manager{
 		cfg: cfg, id: id, st: st, bus: bus, onSettings: onSettings,
 		log:     log.With("component", "cluster"),
-		client:  &http.Client{Timeout: 3 * time.Second},
+		creds:   peer.Credentials{ID: id.ID, Secret: id.Secret},
 		trigger: make(chan struct{}, 1),
 		senders: map[string]*running{},
 	}
@@ -87,7 +94,14 @@ func (m *Manager) round(ctx context.Context) {
 		if mem.ID == m.id.ID || mem.Status != "active" {
 			continue
 		}
-		v, err := m.fetch(ctx, mem.URL)
+		v, err := m.fetch(ctx, mem)
+		if errors.Is(err, errRemoved) {
+			// Another site says we were removed; record it so we stop.
+			if err := Remove(ctx, pool, m.id.ID); err == nil {
+				m.log.Warn("told by another site that this site was removed", "by", mem.ID)
+			}
+			break
+		}
 		if err != nil {
 			continue // unreachable sites are the sender's business
 		}
@@ -110,18 +124,16 @@ func (m *Manager) round(ctx context.Context) {
 	m.reconcile(ctx)
 }
 
-func (m *Manager) fetch(ctx context.Context, url string) (View, error) {
+func (m *Manager) fetch(ctx context.Context, mem Member) (View, error) {
 	var v View
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url+"/v1/members", nil)
-	if err != nil {
-		return v, err
-	}
-	req.Header.Set("Authorization", "Bearer "+m.id.Token)
-	resp, err := m.client.Do(req)
+	resp, err := peer.Do(ctx, peer.Target{URL: mem.URL, Fingerprint: mem.CertFP}, m.creds, http.MethodGet, "/v1/members", nil, 3*time.Second)
 	if err != nil {
 		return v, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusForbidden && resp.Header.Get(RemovedHeader) != "" {
+		return v, errRemoved
+	}
 	if resp.StatusCode != http.StatusOK {
 		return v, fmt.Errorf("status %s", resp.Status)
 	}
@@ -134,7 +146,7 @@ func (m *Manager) reconcile(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	want := map[string]string{}
+	want := map[string]sender.Peer{}
 	selfRemoved := false
 	for _, mem := range members {
 		if mem.ID == m.id.ID {
@@ -142,7 +154,7 @@ func (m *Manager) reconcile(ctx context.Context) {
 			continue
 		}
 		if mem.Status == "active" {
-			want[mem.ID] = mem.URL
+			want[mem.ID] = sender.Peer{ID: mem.ID, URL: mem.URL, FP: mem.CertFP}
 		}
 	}
 
@@ -156,7 +168,7 @@ func (m *Manager) reconcile(ctx context.Context) {
 		want = nil
 	}
 	for id, r := range m.senders {
-		if url, ok := want[id]; !ok || url != r.url {
+		if p, ok := want[id]; !ok || p != r.peer {
 			r.cancel()
 			m.bus.Unsubscribe(r.s.Wake())
 			delete(m.senders, id)
@@ -166,7 +178,7 @@ func (m *Manager) reconcile(ctx context.Context) {
 			}
 		}
 	}
-	for id, url := range want {
+	for id, p := range want {
 		if _, ok := m.senders[id]; ok {
 			continue
 		}
@@ -175,10 +187,10 @@ func (m *Manager) reconcile(ctx context.Context) {
 			continue
 		}
 		sctx, cancel := context.WithCancel(ctx)
-		s := sender.New(m.cfg, sender.Peer{ID: id, URL: url}, m.st, m.bus.Subscribe(), m.log)
-		m.senders[id] = &running{s: s, url: url, cancel: cancel}
+		s := sender.New(m.cfg, p, m.creds, m.st, m.bus.Subscribe(), m.log)
+		m.senders[id] = &running{s: s, peer: p, cancel: cancel}
 		go s.Run(sctx)
-		m.log.Info("syncing with site", "peer", id, "url", url)
+		m.log.Info("syncing with site", "peer", id, "url", p.URL)
 	}
 }
 

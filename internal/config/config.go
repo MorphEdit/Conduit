@@ -18,10 +18,14 @@ import (
 )
 
 type Config struct {
-	NodeID   string `yaml:"node_id"`
-	Listen   string `yaml:"listen"`
-	Database string `yaml:"database"`
-	// Advertise is the URL other sites use to reach this one.
+	NodeID string `yaml:"node_id"`
+	// Listen serves the dashboard and admin actions (plain HTTP: keep it on
+	// the LAN or behind a TLS proxy). PeerListen is the HTTPS port other
+	// sites use.
+	Listen     string `yaml:"listen"`
+	PeerListen string `yaml:"peer_listen"`
+	Database   string `yaml:"database"`
+	// Advertise is the HTTPS URL other sites use to reach this one.
 	Advertise string `yaml:"advertise"`
 
 	// Joining. A new site either founds the cluster (Bootstrap), redeems an
@@ -29,9 +33,6 @@ type Config struct {
 	Bootstrap bool   `yaml:"bootstrap"`
 	Join      string `yaml:"join"`
 	Discovery bool   `yaml:"discovery"`
-	// Token optionally fixes the cluster secret when founding. Normally it is
-	// generated and handed to new sites inside the invite.
-	Token string `yaml:"token"`
 	// AdminPassword unlocks dashboard actions (invite, approve, remove).
 	AdminPassword string `yaml:"admin_password"`
 
@@ -115,10 +116,10 @@ func (c *Config) applyEnv() {
 	}
 	str("CONDUIT_NODE_ID", &c.NodeID)
 	str("CONDUIT_LISTEN", &c.Listen)
+	str("CONDUIT_PEER_LISTEN", &c.PeerListen)
 	str("CONDUIT_DATABASE", &c.Database)
 	str("CONDUIT_ADVERTISE", &c.Advertise)
 	str("CONDUIT_JOIN", &c.Join)
-	str("CONDUIT_TOKEN", &c.Token)
 	str("CONDUIT_ADMIN_PASSWORD", &c.AdminPassword)
 	boolean("CONDUIT_BOOTSTRAP", &c.Bootstrap)
 	boolean("CONDUIT_DISCOVERY", &c.Discovery)
@@ -132,9 +133,12 @@ func (c *Config) applyDefaults() {
 	if c.NodeID == "" {
 		c.NodeID = SanitizeID(host)
 	}
+	if c.PeerListen == "" {
+		c.PeerListen = ":7443"
+	}
 	if c.Advertise == "" {
-		_, port, _ := net.SplitHostPort(c.Listen)
-		c.Advertise = "http://" + host + ":" + port
+		_, port, _ := net.SplitHostPort(c.PeerListen)
+		c.Advertise = "https://" + host + ":" + port
 	}
 	c.Advertise = strings.TrimRight(c.Advertise, "/")
 	if c.Capture.Slot == "" {

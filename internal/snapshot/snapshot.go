@@ -22,6 +22,7 @@ import (
 	"github.com/conduit-sync/conduit/internal/apply"
 	"github.com/conduit-sync/conduit/internal/change"
 	"github.com/conduit-sync/conduit/internal/config"
+	"github.com/conduit-sync/conduit/internal/peer"
 )
 
 type line struct {
@@ -175,13 +176,8 @@ func dumpTable(ctx context.Context, tx pgx.Tx, enc *json.Encoder, qualified stri
 
 // Pull loads a snapshot from the peer at peerURL into the local database.
 // Nothing else may be applying to this database while it runs.
-func Pull(ctx context.Context, cfg *config.Config, peerID, peerURL, token string, truncate bool, ap *apply.Applier, log *slog.Logger) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(peerURL, "/")+"/v1/snapshot", nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := http.DefaultClient.Do(req)
+func Pull(ctx context.Context, cfg *config.Config, peerID string, target peer.Target, creds peer.Credentials, truncate bool, ap *apply.Applier, log *slog.Logger) error {
+	resp, err := peer.Do(ctx, target, creds, http.MethodGet, "/v1/snapshot", nil, 0)
 	if err != nil {
 		return err
 	}

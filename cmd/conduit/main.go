@@ -53,10 +53,12 @@ func main() {
 
 func run(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	rt := node.New(cfg, log)
-	httpSrv := &http.Server{Addr: cfg.Listen, Handler: server.New(rt).Handler(), ReadHeaderTimeout: 10 * time.Second}
+	srv := server.New(rt)
+	rt.PeerHandler = srv.PeerHandler()
+	httpSrv := &http.Server{Addr: cfg.Listen, Handler: srv.DashboardHandler(), ReadHeaderTimeout: 10 * time.Second}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- httpSrv.ListenAndServe() }()
-	log.Info("conduit started", "listen", cfg.Listen, "advertise", cfg.Advertise)
+	log.Info("conduit started", "dashboard", cfg.Listen, "peer_port", cfg.PeerListen, "advertise", cfg.Advertise)
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -86,7 +88,11 @@ func invite(ctx context.Context, cfg *config.Config) error {
 	if err != nil || id == nil || !id.Ready {
 		return errors.New("this site has not joined a cluster yet")
 	}
-	code, exp, err := cluster.CreateInvite(ctx, pool, cfg.Advertise, 24*time.Hour)
+	tlsm, err := cluster.LoadOrCreateTLS(ctx, pool, id.ID)
+	if err != nil {
+		return err
+	}
+	code, exp, err := cluster.CreateInvite(ctx, pool, cfg.Advertise, tlsm.Fingerprint, 24*time.Hour)
 	if err != nil {
 		return err
 	}

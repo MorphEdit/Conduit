@@ -23,6 +23,7 @@ type Beacon struct {
 	ID      string `json:"id"`
 	URL     string `json:"url"`
 	Offset  int64  `json:"offset"`
+	FP      string `json:"fp"` // certificate fingerprint, pinned for the join request
 }
 
 // Broadcast sends b on every IPv4 interface's broadcast address until ctx ends.

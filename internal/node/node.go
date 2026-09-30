@@ -6,10 +6,12 @@ package node
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
+	"net/http"
 	"sync"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 	"github.com/conduit-sync/conduit/internal/cluster"
 	"github.com/conduit-sync/conduit/internal/config"
 	"github.com/conduit-sync/conduit/internal/notify"
+	"github.com/conduit-sync/conduit/internal/peer"
 	"github.com/conduit-sync/conduit/internal/policy"
 	"github.com/conduit-sync/conduit/internal/store"
 )
@@ -46,12 +49,16 @@ type Runtime struct {
 	Cfg      *config.Config
 	Log      *slog.Logger
 	Requests *cluster.Requests
+	// PeerHandler serves other sites on Cfg.PeerListen over TLS. The runtime
+	// starts that listener once this site's certificate exists.
+	PeerHandler http.Handler
 
 	mu       sync.RWMutex
 	phase    string
 	notice   string
 	err      string
 	store    *store.Store
+	tls      *cluster.TLSMaterial
 	identity *cluster.Identity
 	capture  *capture.Capture
 	manager  *cluster.Manager
@@ -70,6 +77,7 @@ type View struct {
 	Notice   string
 	Error    string
 	Store    *store.Store
+	TLS      *cluster.TLSMaterial
 	Identity *cluster.Identity
 	Capture  *capture.Capture
 	Manager  *cluster.Manager
@@ -80,7 +88,7 @@ type View struct {
 func (r *Runtime) View() View {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	v := View{Phase: r.phase, Notice: r.notice, Error: r.err, Store: r.store, Identity: r.identity,
+	v := View{Phase: r.phase, Notice: r.notice, Error: r.err, Store: r.store, TLS: r.tls, Identity: r.identity,
 		Capture: r.capture, Manager: r.manager, Applier: r.applier}
 	if r.pairing != nil {
 		p := *r.pairing
@@ -145,7 +153,14 @@ func (r *Runtime) Run(ctx context.Context) error {
 	if err := retry(ctx, r, func() error { return st.Bootstrap(ctx) }); err != nil {
 		return err
 	}
-	r.set(func() { r.store = st })
+	tlsm, err := cluster.LoadOrCreateTLS(ctx, pool, cfg.NodeID)
+	if err != nil {
+		return err
+	}
+	r.set(func() { r.store, r.tls = st, tlsm })
+	if err := r.servePeers(ctx, tlsm); err != nil {
+		return err
+	}
 
 	id, err := cluster.LoadIdentity(ctx, pool)
 	if err != nil {
@@ -158,7 +173,7 @@ func (r *Runtime) Run(ctx context.Context) error {
 			return err
 		}
 	case cfg.Bootstrap:
-		if id, err = cluster.Found(ctx, pool, cfg); err != nil {
+		if id, err = cluster.Found(ctx, pool, cfg, tlsm.Fingerprint); err != nil {
 			return err
 		}
 		log.Info("founded a new cluster", "cluster", id.ClusterID)
@@ -173,7 +188,7 @@ func (r *Runtime) Run(ctx context.Context) error {
 // start brings up capture, apply, gossip and discovery on a joined site.
 func (r *Runtime) start(ctx context.Context, st *store.Store, id *cluster.Identity) error {
 	cfg, log, pool := r.Cfg, r.Log, st.Pool()
-	cfg.NodeID, cfg.Token = id.ID, id.Token
+	cfg.NodeID = id.ID
 	cfg.Sequences = &config.SequenceConfig{Offset: id.Offset, Step: id.Step}
 	r.set(func() { r.identity = id })
 
@@ -225,7 +240,7 @@ func (r *Runtime) start(ctx context.Context, st *store.Store, id *cluster.Identi
 	})
 	if cfg.Discovery {
 		goRun(func() {
-			cluster.Broadcast(ctx, cluster.Beacon{Cluster: id.ClusterID, ID: id.ID, URL: cfg.Advertise, Offset: id.Offset}, log)
+			cluster.Broadcast(ctx, cluster.Beacon{Cluster: id.ClusterID, ID: id.ID, URL: cfg.Advertise, Offset: id.Offset, FP: r.View().TLS.Fingerprint}, log)
 		})
 	}
 
@@ -234,6 +249,44 @@ func (r *Runtime) start(ctx context.Context, st *store.Store, id *cluster.Identi
 	log.Info("site is syncing", "id", id.ID, "offset", id.Offset, "step", id.Step)
 	wg.Wait()
 	return ctx.Err()
+}
+
+// servePeers starts the HTTPS listener other sites talk to.
+func (r *Runtime) servePeers(ctx context.Context, tlsm *cluster.TLSMaterial) error {
+	if r.PeerHandler == nil {
+		return nil
+	}
+	tc, err := tlsm.ServerConfig()
+	if err != nil {
+		return err
+	}
+	srv := &http.Server{Addr: r.Cfg.PeerListen, Handler: r.PeerHandler, TLSConfig: tc, ReadHeaderTimeout: 10 * time.Second}
+	ln, err := tls.Listen("tcp", r.Cfg.PeerListen, tc)
+	if err != nil {
+		return fmt.Errorf("peer port %s: %w", r.Cfg.PeerListen, err)
+	}
+	go func() {
+		<-ctx.Done()
+		c, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srv.Shutdown(c)
+	}()
+	go func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			r.Log.Error("peer listener stopped", "err", err)
+		}
+	}()
+	r.Log.Info("peer port ready (TLS)", "listen", r.Cfg.PeerListen, "fingerprint", tlsm.Fingerprint[:16]+"…")
+	return nil
+}
+
+// Credentials returns this site's own peer credentials.
+func (r *Runtime) Credentials() peer.Credentials {
+	v := r.View()
+	if v.Identity == nil {
+		return peer.Credentials{}
+	}
+	return peer.Credentials{ID: v.Identity.ID, Secret: v.Identity.Secret}
 }
 
 // retry runs f until it succeeds, showing the last error on the dashboard.

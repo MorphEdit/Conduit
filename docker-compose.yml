@@ -3,6 +3,9 @@
 # `docker network disconnect conduit_wan <container>` simulates a site
 # losing its internet link while its local database keeps working.
 #
+# Sites talk to each other over TLS on 7443 (published as 744x for tests);
+# the dashboard is plain HTTP on 7420 (published as 742x).
+#
 #   host   founds the cluster
 #   local  joins with an invite code (LOCAL_INVITE), empty database
 #   branch has nothing configured: found on the LAN, approved on a dashboard;
@@ -41,11 +44,11 @@ services:
       CONDUIT_NODE_ID: host
       CONDUIT_BOOTSTRAP: "true"
       CONDUIT_DATABASE: postgres://postgres:conduit@pg-host:5432/app?sslmode=disable
-      CONDUIT_ADVERTISE: http://conduit-host:7420
+      CONDUIT_ADVERTISE: https://conduit-host:7443
       CONDUIT_ADMIN_PASSWORD: ${CONDUIT_ADMIN_PASSWORD:-admin}
     volumes: ["./config/host.yaml:/etc/conduit/conduit.yaml:ro"]
     networks: [site_host, wan]
-    ports: ["127.0.0.1:7420:7420"]
+    ports: ["127.0.0.1:7420:7420", "127.0.0.1:7440:7443"]
     depends_on: { pg-host: { condition: service_healthy } }
 
   pg-local:
@@ -62,10 +65,10 @@ services:
       CONDUIT_NODE_ID: local
       CONDUIT_JOIN: ${LOCAL_INVITE:-}
       CONDUIT_DATABASE: postgres://postgres:conduit@pg-local:5432/app?sslmode=disable
-      CONDUIT_ADVERTISE: http://conduit-local:7420
+      CONDUIT_ADVERTISE: https://conduit-local:7443
       CONDUIT_ADMIN_PASSWORD: ${CONDUIT_ADMIN_PASSWORD:-admin}
     networks: [site_local, wan]
-    ports: ["127.0.0.1:7421:7420"]
+    ports: ["127.0.0.1:7421:7420", "127.0.0.1:7441:7443"]
     depends_on: { pg-local: { condition: service_healthy } }
 
   pg-branch:
@@ -82,10 +85,10 @@ services:
     environment:
       CONDUIT_NODE_ID: branch
       CONDUIT_DATABASE: postgres://postgres:conduit@pg-branch:5432/app?sslmode=disable
-      CONDUIT_ADVERTISE: http://conduit-branch:7420
+      CONDUIT_ADVERTISE: https://conduit-branch:7443
       CONDUIT_ADMIN_PASSWORD: ${CONDUIT_ADMIN_PASSWORD:-admin}
     networks: [site_branch, wan]
-    ports: ["127.0.0.1:7422:7420"]
+    ports: ["127.0.0.1:7422:7420", "127.0.0.1:7442:7443"]
     depends_on: { pg-branch: { condition: service_healthy } }
 
 networks:

@@ -81,6 +81,17 @@ var bootstrapSQL = []string{
 		joined_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
 		updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 	)`,
+	// Credentials other sites use to verify this member: a hash of its
+	// secret and its pinned certificate fingerprint.
+	`ALTER TABLE conduit.members ADD COLUMN IF NOT EXISTS key_hash TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE conduit.members ADD COLUMN IF NOT EXISTS cert_fp TEXT NOT NULL DEFAULT ''`,
+	// This site's own TLS certificate (self-signed, pinned by peers).
+	`CREATE TABLE IF NOT EXISTS conduit.tls (
+		singleton   BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
+		cert_pem    BYTEA NOT NULL,
+		key_pem     BYTEA NOT NULL,
+		fingerprint TEXT  NOT NULL
+	)`,
 	// Cluster-wide settings (table owners, id step). Gossiped like members.
 	`CREATE TABLE IF NOT EXISTS conduit.settings (
 		key        TEXT PRIMARY KEY,
