@@ -1,7 +1,7 @@
-node_id: local
+node_id: branch
 listen: ":7420"
 token: ${CONDUIT_TOKEN}
-database: postgres://postgres:conduit@pg-local:5432/app?sslmode=disable
+database: postgres://postgres:conduit@pg-branch:5432/app?sslmode=disable
 
 capture:
   enabled: true
@@ -9,7 +9,7 @@ capture:
 
 # ids: host 1,11,21...  local 2,12,22...  branch 3,13,23...  (room for 10 sites)
 sequences:
-  offset: 2
+  offset: 3
   step: 10
 
 tables:
@@ -19,4 +19,4 @@ tombstone_ttl: 168h
 
 peers:
   - { id: host, url: http://conduit-host:7420 }
-  - { id: branch, url: http://conduit-branch:7420 }
+  - { id: local, url: http://conduit-local:7420 }

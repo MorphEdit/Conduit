@@ -1,7 +1,10 @@
 // Package change defines the wire format Conduit nodes exchange.
 package change
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Column is one column value in text form, exactly as pgoutput delivers it.
 type Column struct {
@@ -58,4 +61,23 @@ func KeyColumns(cols []Column) []Column {
 		return cols
 	}
 	return keys
+}
+
+// KeyJSON renders key columns as a canonical JSON object ({"col":"val"},
+// keys sorted) used to identify a row in tombstones and conflict records.
+func KeyJSON(keys []Column) string {
+	m := make(map[string]*string, len(keys))
+	for _, k := range keys {
+		m[k.Name] = k.Value
+	}
+	b, _ := json.Marshal(m)
+	return string(b)
+}
+
+// RowKey returns the columns that identify the row a change targets.
+func (c Change) RowKey() []Column {
+	if len(c.Old) > 0 {
+		return c.Old
+	}
+	return KeyColumns(c.New)
 }

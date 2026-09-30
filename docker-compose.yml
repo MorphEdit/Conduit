@@ -1,10 +1,13 @@
-# Test bench: two Postgres sites and one Conduit per site.
-# Phase 1 = one-way (host -> local).
+# Test bench: three sites. Each site has its own network (site_*) with a
+# Postgres and a Conduit; only the Conduits share the "wan" network, so
+# `docker network disconnect conduit_wan <container>` simulates a site
+# losing its internet link while its local database keeps working.
 x-postgres: &postgres
   image: postgres:16-alpine
   command: >
     postgres
     -c wal_level=logical
+    -c track_commit_timestamp=on
     -c max_replication_slots=10
     -c max_wal_senders=10
   environment:
@@ -22,6 +25,7 @@ x-postgres: &postgres
 
 x-conduit: &conduit
   build: .
+  image: conduit:dev
   environment:
     CONDUIT_TOKEN: ${CONDUIT_TOKEN:-dev-secret-change-me}
   restart: unless-stopped
@@ -30,22 +34,49 @@ x-conduit: &conduit
 services:
   pg-host:
     <<: *postgres
+    networks: [site_host]
     ports: ["127.0.0.1:55432:5432"]
-
-  pg-local:
-    <<: *postgres
-    ports: ["127.0.0.1:55433:5432"]
 
   conduit-host:
     <<: *conduit
     volumes: ["./config/host.yaml:/etc/conduit/conduit.yaml:ro"]
+    networks: [site_host, wan]
     ports: ["127.0.0.1:7420:7420"]
     depends_on:
       pg-host: { condition: service_healthy }
 
+  pg-local:
+    <<: *postgres
+    networks: [site_local]
+    ports: ["127.0.0.1:55433:5432"]
+
   conduit-local:
     <<: *conduit
     volumes: ["./config/local.yaml:/etc/conduit/conduit.yaml:ro"]
+    networks: [site_local, wan]
     ports: ["127.0.0.1:7421:7420"]
     depends_on:
       pg-local: { condition: service_healthy }
+
+  # Third site, started later by the tests to exercise snapshot join.
+  pg-branch:
+    <<: *postgres
+    profiles: [branch]
+    networks: [site_branch]
+    ports: ["127.0.0.1:55434:5432"]
+
+  conduit-branch:
+    <<: *conduit
+    profiles: [branch]
+    volumes: ["./config/branch.yaml:/etc/conduit/conduit.yaml:ro"]
+    networks: [site_branch, wan]
+    ports: ["127.0.0.1:7422:7420"]
+    depends_on:
+      pg-branch: { condition: service_healthy }
+
+networks:
+  site_host:
+  site_local:
+  site_branch:
+  wan:
+    name: conduit_wan

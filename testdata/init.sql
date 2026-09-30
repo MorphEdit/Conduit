@@ -2,6 +2,7 @@
 -- Column types are deliberately varied to exercise text-format apply.
 CREATE TABLE customers (
     id         SERIAL PRIMARY KEY,
+    code       TEXT UNIQUE,
     name       TEXT NOT NULL,
     email      TEXT,
     vip        BOOLEAN NOT NULL DEFAULT false,
@@ -29,4 +30,13 @@ CREATE TABLE quotation_items (
     qty          NUMERIC(10,2) NOT NULL,
     unit_price   NUMERIC(14,2) NOT NULL,
     PRIMARY KEY (quotation_id, line_no)
+);
+
+-- Owned by the host node (see config/*.yaml): read-only everywhere else.
+-- GENERATED ALWAYS identity exercises OVERRIDING SYSTEM VALUE on apply.
+CREATE TABLE stock_lots (
+    id       BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    sku      TEXT NOT NULL,
+    qty      NUMERIC(12,2) NOT NULL,
+    lot_date DATE NOT NULL DEFAULT current_date
 );

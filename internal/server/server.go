@@ -13,6 +13,7 @@ import (
 	"github.com/conduit-sync/conduit/internal/change"
 	"github.com/conduit-sync/conduit/internal/config"
 	"github.com/conduit-sync/conduit/internal/sender"
+	"github.com/conduit-sync/conduit/internal/snapshot"
 	"github.com/conduit-sync/conduit/internal/store"
 )
 
@@ -37,13 +38,33 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
 	mux.HandleFunc("GET /status", s.status)
 	mux.HandleFunc("POST /v1/apply", s.apply)
+	mux.HandleFunc("GET /v1/snapshot", s.snapshot)
 	return mux
 }
 
-func (s *Server) apply(w http.ResponseWriter, r *http.Request) {
+func (s *Server) authorized(w http.ResponseWriter, r *http.Request) bool {
 	want := []byte("Bearer " + s.cfg.Token)
 	if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), want) != 1 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
+
+func (s *Server) snapshot(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(w, r) {
+		return
+	}
+	s.log.Info("serving snapshot", "remote", r.RemoteAddr)
+	if err := snapshot.Serve(r.Context(), w, s.store.Pool(), s.cfg); err != nil {
+		// Headers may already be sent; the client detects the missing "end" line.
+		s.log.Warn("snapshot failed", "err", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) apply(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(w, r) {
 		return
 	}
 	var b change.Batch
@@ -83,6 +104,9 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	out["peers"] = peers
 	if inbox, err := s.store.InboxStates(r.Context()); err == nil {
 		out["inbox"] = inbox
+	}
+	if c, err := s.store.Conflicts(r.Context(), 10); err == nil {
+		out["conflicts"] = c
 	}
 	writeJSON(w, out)
 }

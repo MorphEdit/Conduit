@@ -7,6 +7,8 @@ import (
 	"os"
 	"regexp"
 	"slices"
+	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -18,6 +20,27 @@ type Config struct {
 	Database string        `yaml:"database"`
 	Capture  CaptureConfig `yaml:"capture"`
 	Peers    []Peer        `yaml:"peers"`
+
+	// Sequences gives this node its own residue class for SERIAL/IDENTITY
+	// ids (id % step == offset % step) so nodes never generate the same id.
+	Sequences *SequenceConfig `yaml:"sequences"`
+	// Tables holds per-table policies keyed by "schema.table" (or "table"
+	// for the public schema).
+	Tables map[string]TablePolicy `yaml:"tables"`
+	// TombstoneTTL is how long deleted-row markers are kept for conflict
+	// resolution. Must exceed the longest expected outage.
+	TombstoneTTL time.Duration `yaml:"tombstone_ttl"`
+}
+
+type SequenceConfig struct {
+	Offset int64 `yaml:"offset"`
+	Step   int64 `yaml:"step"`
+}
+
+type TablePolicy struct {
+	// Owner, when set, is the only node allowed to write this table.
+	// Other nodes get a guard trigger and still receive its changes.
+	Owner string `yaml:"owner"`
 }
 
 type CaptureConfig struct {
@@ -64,6 +87,17 @@ func (c *Config) applyDefaults() {
 	if len(c.Capture.Schemas) == 0 {
 		c.Capture.Schemas = []string{"public"}
 	}
+	if c.TombstoneTTL == 0 {
+		c.TombstoneTTL = 7 * 24 * time.Hour
+	}
+	tables := make(map[string]TablePolicy, len(c.Tables))
+	for name, p := range c.Tables {
+		if !strings.Contains(name, ".") {
+			name = "public." + name
+		}
+		tables[name] = p
+	}
+	c.Tables = tables
 }
 
 func (c *Config) validate() error {
@@ -93,6 +127,14 @@ func (c *Config) validate() error {
 		}
 		seen[p.ID] = true
 	}
+	if sq := c.Sequences; sq != nil && (sq.Step < 1 || sq.Offset < 1 || sq.Offset > sq.Step) {
+		errs = append(errs, errors.New("sequences needs 1 <= offset <= step"))
+	}
+	for name, p := range c.Tables {
+		if p.Owner != "" && p.Owner != c.NodeID && !seen[p.Owner] {
+			errs = append(errs, fmt.Errorf("tables.%s.owner %q is neither node_id nor a peer", name, p.Owner))
+		}
+	}
 	return errors.Join(errs...)
 }
 
@@ -103,4 +145,9 @@ func (c *Config) PeerIDs() []string {
 		ids[i] = p.ID
 	}
 	return ids
+}
+
+// Owner returns the owning node of schema.table, or "" if any node may write.
+func (c *Config) Owner(schema, table string) string {
+	return c.Tables[schema+"."+table].Owner
 }

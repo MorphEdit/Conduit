@@ -1,0 +1,255 @@
+﻿# Conduit end-to-end test suite (phase 5).
+# Usage (repo root):  powershell -ExecutionPolicy Bypass -File scripts\test.ps1
+#   -Keep   leave the containers running afterwards (for poking at /status)
+param([switch]$Keep)
+
+$ErrorActionPreference = 'Continue'
+Set-Location (Split-Path $PSScriptRoot -Parent)
+
+# Send SQL on stdin as UTF-8: Windows PowerShell mangles quotes in native args.
+$OutputEncoding = [Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+
+$tables = @('customers', 'quotations', 'quotation_items', 'stock_lots')
+$ports = @{ host = 7420; local = 7421; branch = 7422 }
+$token = if ($env:CONDUIT_TOKEN) { $env:CONDUIT_TOKEN } else { 'dev-secret-change-me' }
+$script:nodes = @('host', 'local')
+$script:passed = 0
+$script:failed = 0
+
+function Compose { docker compose --profile branch @args; if ($LASTEXITCODE -ne 0) { throw "docker compose $args failed" } }
+
+function Sql([string]$node, [string]$q) {
+    $out = $q | docker compose --profile branch exec -T "pg-$node" psql -U postgres -d app -v ON_ERROR_STOP=1 -qtA -f - 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "SQL on $node failed: $($out -join ' ')" }
+    return ($out -join "`n").Trim()
+}
+
+# Returns $true if the statement was rejected.
+function SqlFails([string]$node, [string]$q) {
+    try { Sql $node $q | Out-Null; return $false } catch { return $true }
+}
+
+function Checksum([string]$node) {
+    $parts = foreach ($t in $tables) {
+        Sql $node "SELECT '${t}:' || count(*) || ':' || coalesce(md5(string_agg(x::text, '|' ORDER BY x::text)), '-') FROM $t x"
+    }
+    return ($parts -join ' ')
+}
+
+function Pass([string]$m) { Write-Host "  PASS  $m" -ForegroundColor Green; $script:passed++ }
+function Fail([string]$m) { Write-Host "  FAIL  $m" -ForegroundColor Red; $script:failed++ }
+function Check([bool]$ok, [string]$m) { if ($ok) { Pass $m } else { Fail $m } }
+function Section([string]$m) { Write-Host "`n== $m ==" -ForegroundColor Cyan }
+
+function WaitHealthy([string]$node) {
+    for ($i = 0; $i -lt 90; $i++) {
+        try { Invoke-RestMethod "http://127.0.0.1:$($ports[$node])/health" -TimeoutSec 2 | Out-Null; return } catch { Start-Sleep 1 }
+    }
+    throw "conduit-$node did not become healthy"
+}
+
+function Status([string]$node) { Invoke-RestMethod "http://127.0.0.1:$($ports[$node])/status" -TimeoutSec 5 }
+
+function AssertSynced([string]$name, [int]$timeoutSec = 90) {
+    $deadline = (Get-Date).AddSeconds($timeoutSec)
+    do {
+        $sums = @{}
+        foreach ($n in $script:nodes) { $sums[$n] = Checksum $n }
+        $distinct = @($sums.Values | Sort-Object -Unique)
+        if ($distinct.Count -eq 1) { Pass "$name  [$($script:nodes -join ', ') identical]"; return }
+        Start-Sleep 1
+    } while ((Get-Date) -lt $deadline)
+    Fail $name
+    foreach ($n in $script:nodes) { Write-Host ("        {0,-6} {1}" -f $n, $sums[$n]) }
+}
+
+function Container([string]$svc) { (docker compose --profile branch ps -q $svc).Trim() }
+function CutWan([string]$node) { docker network disconnect conduit_wan (Container "conduit-$node") | Out-Null }
+function HealWan([string]$node) { docker network connect --alias "conduit-$node" conduit_wan (Container "conduit-$node") | Out-Null }
+
+function ConflictCount([string]$node, [string]$kind) {
+    [int](Sql $node "SELECT count(*) FROM conduit.conflicts WHERE kind = '$kind'")
+}
+
+# ---------------------------------------------------------------------------
+Section "starting test bench (fresh)"
+docker compose --profile branch down -v --remove-orphans 2>&1 | Out-Null
+Compose up -d --build pg-host pg-local conduit-host conduit-local 2>&1 | Out-Null
+WaitHealthy host; WaitHealthy local
+Write-Host "  host + local up; branch will join later"
+
+# ---------------------------------------------------------------------------
+Section "1. host -> local, every column type"
+Sql host @"
+BEGIN;
+INSERT INTO customers (code, name, email, vip, tags) VALUES
+  ('C-A', 'บริษัท ก จำกัด', 'a@example.com', true, '{construction,vip}'),
+  ('C-B', 'O''Brien & Sons', NULL, false, NULL),
+  ('C-C', 'ร้าน ข', 'b@example.com', false, '{"with space","quote\"d"}');
+INSERT INTO quotations (customer_id, doc_no, total, meta, issued_on, attachment, note)
+  SELECT id, 'QT-H-0001', 125000.50, '{"vat":7,"items":[1,2]}', '2026-09-30', '\xdeadbeef', E'line1\nline2\ttab'
+  FROM customers WHERE code = 'C-A';
+INSERT INTO quotation_items SELECT q.id, n, 'งาน ' || n, n * 1.5, 1000 * n FROM quotations q, generate_series(1,3) n;
+INSERT INTO stock_lots (sku, qty) VALUES ('STEEL-10', 100), ('PIPE-2', 40);
+COMMIT;
+UPDATE customers SET vip = true WHERE code = 'C-C';
+UPDATE quotation_items SET qty = 99 WHERE line_no = 2;
+DELETE FROM customers WHERE code = 'C-B';
+"@ | Out-Null
+AssertSynced 'basic sync host -> local'
+
+# ---------------------------------------------------------------------------
+Section "2. local -> host (two-way) and id ranges"
+Sql local "INSERT INTO customers (code, name) VALUES ('C-L1', 'ลูกค้าจาก local'), ('C-L2', 'local two')" | Out-Null
+Sql local "INSERT INTO quotations (customer_id, doc_no, total) SELECT id, 'QT-L-0001', 500 FROM customers WHERE code = 'C-L1'" | Out-Null
+AssertSynced 'local writes reach host'
+$hostIds = Sql host "SELECT string_agg(DISTINCT (id % 10)::text, ',') FROM customers WHERE code LIKE 'C-%' AND code NOT LIKE 'C-L%'"
+$localIds = Sql host "SELECT string_agg(DISTINCT (id % 10)::text, ',') FROM customers WHERE code LIKE 'C-L%'"
+Check ($hostIds -eq '1' -and $localIds -eq '2') "ids: host-made end in 1, local-made end in 2 (got $hostIds / $localIds)"
+
+# ---------------------------------------------------------------------------
+Section "3. no ping-pong"
+Start-Sleep 3
+$seqBefore = @{ host = Sql host "SELECT last_value FROM conduit.outbox_seq_seq"; local = Sql local "SELECT last_value FROM conduit.outbox_seq_seq" }
+Start-Sleep 6
+$seqAfter = @{ host = Sql host "SELECT last_value FROM conduit.outbox_seq_seq"; local = Sql local "SELECT last_value FROM conduit.outbox_seq_seq" }
+Check ($seqBefore.host -eq $seqAfter.host -and $seqBefore.local -eq $seqAfter.local) "outboxes idle when nobody writes (host $($seqAfter.host), local $($seqAfter.local))"
+$hostApplied = Sql host "SELECT applied_seq FROM conduit.inbox_state WHERE origin = 'local'"
+Check ($hostApplied -eq $seqAfter.local) "host applied exactly local's $($seqAfter.local) transactions, nothing echoed back"
+
+# ---------------------------------------------------------------------------
+Section "4. internet cut: both sides keep inserting"
+CutWan local
+Sql host  "INSERT INTO customers (name) SELECT 'offline-host-' || g FROM generate_series(1,20) g" | Out-Null
+Sql local "INSERT INTO customers (name) SELECT 'offline-local-' || g FROM generate_series(1,20) g" | Out-Null
+Start-Sleep 2
+$bl = (Status host).peers | Where-Object id -eq 'local'
+Check ($bl.backlog -gt 0) "host queues changes for local while cut (backlog $($bl.backlog))"
+HealWan local
+AssertSynced 'both sides merged after reconnect'
+$dupIds = Sql host "SELECT count(*) - count(DISTINCT id) FROM customers"
+Check ($dupIds -eq '0') 'no id collisions'
+
+# ---------------------------------------------------------------------------
+Section "5. same row edited on both sides while cut (last write wins)"
+Sql host "INSERT INTO customers (code, name) VALUES ('C-X', 'original')" | Out-Null
+AssertSynced 'row C-X on both'
+$before = ConflictCount local 'update_update'
+CutWan local
+Sql host  "UPDATE customers SET name = 'edited on host (earlier)' WHERE code = 'C-X'" | Out-Null
+Start-Sleep 1
+Sql local "UPDATE customers SET name = 'edited on local (later)' WHERE code = 'C-X'" | Out-Null
+HealWan local
+AssertSynced 'converged after concurrent edits'
+$final = Sql host "SELECT name FROM customers WHERE code = 'C-X'"
+Check ($final -eq 'edited on local (later)') "later edit won everywhere ('$final')"
+Check ((ConflictCount local 'update_update') -gt $before) 'conflict recorded on local (older host edit skipped)'
+
+# ---------------------------------------------------------------------------
+Section "6. delete vs update while cut"
+Sql host "INSERT INTO customers (code, name) VALUES ('C-Y', 'y'), ('C-Z', 'z')" | Out-Null
+AssertSynced 'rows C-Y, C-Z on both'
+CutWan local
+Sql host  "DELETE FROM customers WHERE code = 'C-Y'" | Out-Null          # Y: delete first ...
+Sql local "UPDATE customers SET name = 'z edited first' WHERE code = 'C-Z'" | Out-Null  # Z: update first ...
+Start-Sleep 1
+Sql local "UPDATE customers SET name = 'y edited later' WHERE code = 'C-Y'" | Out-Null  # ... Y: then update
+Sql host  "DELETE FROM customers WHERE code = 'C-Z'" | Out-Null          # ... Z: then delete
+HealWan local
+AssertSynced 'converged after delete/update races'
+$y = Sql host "SELECT coalesce((SELECT name FROM customers WHERE code = 'C-Y'), '<gone>')"
+$z = Sql host "SELECT coalesce((SELECT name FROM customers WHERE code = 'C-Z'), '<gone>')"
+Check ($y -eq 'y edited later') "update after delete wins: C-Y = '$y'"
+Check ($z -eq '<gone>') "delete after update wins: C-Z = '$z'"
+
+# ---------------------------------------------------------------------------
+Section "7. owner-only table (stock_lots owned by host)"
+Check (SqlFails local "INSERT INTO stock_lots (sku, qty) VALUES ('HACK', 1)") 'local cannot write stock_lots'
+Check (SqlFails local "UPDATE stock_lots SET qty = 0") 'local cannot update stock_lots'
+Sql host "UPDATE stock_lots SET qty = qty - 5 WHERE sku = 'STEEL-10'" | Out-Null
+AssertSynced 'host stock change reaches local'
+
+# ---------------------------------------------------------------------------
+Section "8. unique conflict (same code created on both sides)"
+CutWan local
+Sql host  "INSERT INTO customers (code, name) VALUES ('DUP-1', 'dup made on host')" | Out-Null
+Sql local "INSERT INTO customers (code, name) VALUES ('DUP-1', 'dup made on local')" | Out-Null
+HealWan local
+Sql host "INSERT INTO customers (code, name) VALUES ('AFTER-DUP', 'queue still moving')" | Out-Null
+$deadline = (Get-Date).AddSeconds(90)
+while ((Get-Date) -lt $deadline -and (Sql local "SELECT count(*) FROM customers WHERE code = 'AFTER-DUP'") -ne '1') { Start-Sleep 1 }
+Check ((Sql local "SELECT count(*) FROM customers WHERE code = 'AFTER-DUP'") -eq '1') 'queue not blocked by the conflict'
+Check ((ConflictCount host 'unique_violation') -ge 1 -and (ConflictCount local 'unique_violation') -ge 1) 'unique_violation recorded on both nodes'
+# Manual fix: keep host's row. Delete local's copy, then touch host's row so it is re-sent.
+Sql local "DELETE FROM customers WHERE code = 'DUP-1'" | Out-Null
+Start-Sleep 2
+Sql host "UPDATE customers SET name = name WHERE code = 'DUP-1'" | Out-Null
+AssertSynced 'converged after manual resolution'
+
+# ---------------------------------------------------------------------------
+Section "9. outages"
+Compose stop conduit-local 2>&1 | Out-Null
+Sql host "INSERT INTO customers (name) SELECT 'while-conduit-local-down-' || g FROM generate_series(1,30) g" | Out-Null
+Compose start conduit-local 2>&1 | Out-Null
+AssertSynced 'catch up after conduit-local restart'
+
+Compose stop pg-local 2>&1 | Out-Null
+Sql host "UPDATE customers SET email = id || '@x.test' WHERE name LIKE 'while-%'" | Out-Null
+Start-Sleep 3
+Compose start pg-local 2>&1 | Out-Null
+AssertSynced 'catch up after local database restart'
+
+Compose stop conduit-host 2>&1 | Out-Null
+Sql host  "INSERT INTO customers (name) SELECT 'while-conduit-host-down-' || g FROM generate_series(1,10) g" | Out-Null
+Sql local "INSERT INTO customers (name) SELECT 'local-while-host-conduit-down-' || g FROM generate_series(1,10) g" | Out-Null
+Compose start conduit-host 2>&1 | Out-Null
+WaitHealthy host
+AssertSynced 'catch up after conduit-host restart'
+
+# ---------------------------------------------------------------------------
+Section "10. new site joins via snapshot"
+Compose up -d pg-branch 2>&1 | Out-Null
+for ($i = 0; $i -lt 60 -and (docker compose --profile branch exec -T pg-branch pg_isready -U postgres -d app 2>$null) -notmatch 'accepting'; $i++) { Start-Sleep 1 }
+Start-Sleep 2
+$snap = docker compose --profile branch run --rm --no-deps conduit-branch -config /etc/conduit/conduit.yaml -snapshot-from host 2>&1 | ForEach-Object { "$_" }
+Check ($LASTEXITCODE -eq 0) 'snapshot command succeeded'
+$snap | Select-String 'snapshot applied' | ForEach-Object { Write-Host "        $($_.Line.Trim())" }
+Compose up -d conduit-branch 2>&1 | Out-Null
+WaitHealthy branch
+$script:nodes = @('host', 'local', 'branch')
+AssertSynced 'branch matches host and local'
+Sql branch "INSERT INTO customers (code, name) VALUES ('C-BR', 'จาก branch')" | Out-Null
+Sql local  "INSERT INTO customers (code, name) VALUES ('C-L3', 'local after branch joined')" | Out-Null
+Sql host   "UPDATE customers SET vip = true WHERE code = 'C-A'" | Out-Null
+AssertSynced 'three-way sync'
+$brId = Sql host "SELECT id % 10 FROM customers WHERE code = 'C-BR'"
+Check ($brId -eq '3') "branch-made id ends in 3 (got $brId)"
+Check (SqlFails branch "DELETE FROM stock_lots") 'branch cannot write stock_lots'
+$spurious = Sql branch "SELECT count(*) FROM conduit.conflicts"
+Check ($spurious -eq '0') "no spurious conflicts on the new site ($spurious)"
+
+# ---------------------------------------------------------------------------
+Section "11. protocol safety"
+$before = [int](Sql local "SELECT applied_seq FROM conduit.inbox_state WHERE origin = 'host'")
+$batch = @{ origin = 'host'; txs = @(@{ seq = 1; lsn = '0/0'; commit_time = (Get-Date).ToString('o'); changes = @(
+    @{ op = 'I'; s = 'public'; t = 'customers'; new = @(@{ n = 'id'; k = $true; v = '999999' }, @{ n = 'name'; v = 'replayed-must-not-appear' }) }) }) }
+$ack = Invoke-RestMethod "http://127.0.0.1:7421/v1/apply" -Method Post -ContentType 'application/json' `
+    -Headers @{ Authorization = "Bearer $token" } -Body ($batch | ConvertTo-Json -Depth 10)
+Check ($ack.applied -eq $before -and (Sql local "SELECT count(*) FROM customers WHERE id = 999999") -eq '0') "replayed old seq is skipped (applied stays $before)"
+$code = try { Invoke-WebRequest "http://127.0.0.1:7421/v1/apply" -Method Post -Body '{}' -Headers @{ Authorization = 'Bearer wrong' } -UseBasicParsing | Out-Null; 200 } catch { [int]$_.Exception.Response.StatusCode }
+Check ($code -eq 401) "wrong token rejected ($code)"
+$code = try { Invoke-WebRequest "http://127.0.0.1:7421/v1/snapshot" -UseBasicParsing | Out-Null; 200 } catch { [int]$_.Exception.Response.StatusCode }
+Check ($code -eq 401) "snapshot needs the token ($code)"
+
+# ---------------------------------------------------------------------------
+Write-Host ""
+foreach ($n in $script:nodes) {
+    $s = Status $n
+    $peers = ($s.peers | ForEach-Object { "$($_.id)=acked $($_.acked_seq)" }) -join ', '
+    Write-Host ("{0,-6} outbox pending {1,-3} conflicts {2,-3} {3}" -f $n, $s.outbox.pending, $s.conflicts.total, $peers)
+}
+Write-Host ""
+if (-not $Keep) { docker compose --profile branch down -v 2>&1 | Out-Null }
+if ($script:failed -eq 0) { Write-Host "ALL $($script:passed) CHECKS PASSED" -ForegroundColor Green; exit 0 }
+Write-Host "$($script:failed) FAILED, $($script:passed) passed" -ForegroundColor Red; exit 1

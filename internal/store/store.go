@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/conduit-sync/conduit/internal/change"
@@ -36,6 +37,38 @@ var bootstrapSQL = []string{
 		applied_seq BIGINT      NOT NULL DEFAULT 0,
 		updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 	)`,
+	// Deleted-row markers: lets an old UPDATE that arrives after a newer
+	// DELETE lose instead of resurrecting the row.
+	`CREATE TABLE IF NOT EXISTS conduit.tombstones (
+		schema_name TEXT        NOT NULL,
+		table_name  TEXT        NOT NULL,
+		pk          TEXT        NOT NULL,
+		deleted_at  TIMESTAMPTZ NOT NULL,
+		PRIMARY KEY (schema_name, table_name, pk)
+	)`,
+	// Every remote change that was not applied as-is, for audit and manual fixes.
+	`CREATE TABLE IF NOT EXISTS conduit.conflicts (
+		id          BIGSERIAL PRIMARY KEY,
+		detected_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		origin      TEXT        NOT NULL,
+		schema_name TEXT        NOT NULL,
+		table_name  TEXT        NOT NULL,
+		pk          TEXT        NOT NULL,
+		kind        TEXT        NOT NULL,
+		resolution  TEXT        NOT NULL,
+		remote_time TIMESTAMPTZ,
+		change      JSONB       NOT NULL,
+		detail      TEXT
+	)`,
+	`CREATE INDEX IF NOT EXISTS conflicts_detected_at ON conduit.conflicts (detected_at)`,
+	// Rejects writes to tables owned by another node. Apply sessions run with
+	// session_replication_role = replica, where this trigger does not fire.
+	`CREATE OR REPLACE FUNCTION conduit.owner_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+	BEGIN
+		RAISE EXCEPTION 'table %.% is owned by node "%"; write there instead',
+			TG_TABLE_SCHEMA, TG_TABLE_NAME, TG_ARGV[0]
+			USING ERRCODE = 'insufficient_privilege';
+	END $$`,
 }
 
 type Store struct {
@@ -48,6 +81,13 @@ func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 func (s *Store) Pool() *pgxpool.Pool { return s.pool }
 
 func (s *Store) Bootstrap(ctx context.Context) error {
+	var trackTs string
+	if err := s.pool.QueryRow(ctx, `SHOW track_commit_timestamp`).Scan(&trackTs); err != nil {
+		return err
+	}
+	if trackTs != "on" {
+		return fmt.Errorf("track_commit_timestamp is %q; set it to on and restart Postgres (needed for conflict resolution)", trackTs)
+	}
 	for _, q := range bootstrapSQL {
 		if _, err := s.pool.Exec(ctx, q); err != nil {
 			return err
@@ -71,14 +111,53 @@ func (s *Store) EnsureCursors(ctx context.Context, peers []string) error {
 
 // AppendOutbox stores one committed transaction. The unique lsn makes a
 // replay after a crash (before the slot position was confirmed) a no-op.
+// Local deletes also leave a tombstone, written in the same transaction.
 func (s *Store) AppendOutbox(ctx context.Context, lsn string, commitTime time.Time, changes []change.Change) error {
 	payload, err := json.Marshal(changes)
 	if err != nil {
 		return err
 	}
-	_, err = s.pool.Exec(ctx,
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx,
 		`INSERT INTO conduit.outbox (lsn, commit_time, payload) VALUES ($1::pg_lsn, $2, $3)
-		 ON CONFLICT (lsn) DO NOTHING`, lsn, commitTime, payload)
+		 ON CONFLICT (lsn) DO NOTHING`, lsn, commitTime, payload); err != nil {
+		return err
+	}
+	for _, ch := range changes {
+		if ch.Op == "D" {
+			if err := AddTombstone(ctx, tx, ch.Schema, ch.Table, change.KeyJSON(ch.RowKey()), commitTime); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+// Execer is satisfied by pgx pools, connections and transactions.
+type Execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+func AddTombstone(ctx context.Context, db Execer, schema, table, pk string, at time.Time) error {
+	_, err := db.Exec(ctx,
+		`INSERT INTO conduit.tombstones (schema_name, table_name, pk, deleted_at) VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (schema_name, table_name, pk)
+		 DO UPDATE SET deleted_at = greatest(conduit.tombstones.deleted_at, EXCLUDED.deleted_at)`,
+		schema, table, pk, at)
+	return err
+}
+
+// Janitor removes tombstones older than ttl and conflicts older than 90 days.
+func (s *Store) Janitor(ctx context.Context, ttl time.Duration) error {
+	if _, err := s.pool.Exec(ctx,
+		`DELETE FROM conduit.tombstones WHERE deleted_at < now() - make_interval(secs => $1)`, ttl.Seconds()); err != nil {
+		return err
+	}
+	_, err := s.pool.Exec(ctx, `DELETE FROM conduit.conflicts WHERE detected_at < now() - interval '90 days'`)
 	return err
 }
 
@@ -164,4 +243,44 @@ func (s *Store) InboxStates(ctx context.Context) ([]InboxState, error) {
 		out = append(out, st)
 	}
 	return out, rows.Err()
+}
+
+type Conflict struct {
+	ID         int64      `json:"id"`
+	DetectedAt time.Time  `json:"detected_at"`
+	Origin     string     `json:"origin"`
+	Table      string     `json:"table"`
+	PK         string     `json:"pk"`
+	Kind       string     `json:"kind"`
+	Resolution string     `json:"resolution"`
+	RemoteTime *time.Time `json:"remote_time,omitempty"`
+	Detail     string     `json:"detail,omitempty"`
+}
+
+type ConflictStats struct {
+	Total  int64      `json:"total"`
+	Recent []Conflict `json:"recent"`
+}
+
+func (s *Store) Conflicts(ctx context.Context, limit int) (ConflictStats, error) {
+	var st ConflictStats
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM conduit.conflicts`).Scan(&st.Total); err != nil {
+		return st, err
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, detected_at, origin, schema_name || '.' || table_name, pk, kind, resolution, remote_time, coalesce(detail, '')
+		 FROM conduit.conflicts ORDER BY id DESC LIMIT $1`, limit)
+	if err != nil {
+		return st, err
+	}
+	defer rows.Close()
+	st.Recent = []Conflict{}
+	for rows.Next() {
+		var c Conflict
+		if err := rows.Scan(&c.ID, &c.DetectedAt, &c.Origin, &c.Table, &c.PK, &c.Kind, &c.Resolution, &c.RemoteTime, &c.Detail); err != nil {
+			return st, err
+		}
+		st.Recent = append(st.Recent, c)
+	}
+	return st, rows.Err()
 }

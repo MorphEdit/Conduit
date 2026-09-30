@@ -5,10 +5,18 @@ database: postgres://postgres:conduit@pg-host:5432/app?sslmode=disable
 
 capture:
   enabled: true
-  slot: conduit_slot
-  publication: conduit_pub
   schemas: [public]
 
+# ids: host 1,11,21...  local 2,12,22...  branch 3,13,23...  (room for 10 sites)
+sequences:
+  offset: 1
+  step: 10
+
+tables:
+  stock_lots: { owner: host }   # only host may write; others receive
+
+tombstone_ttl: 168h
+
 peers:
-  - id: local
-    url: http://conduit-local:7420
+  - { id: local, url: http://conduit-local:7420 }
+  - { id: branch, url: http://conduit-branch:7420 }
