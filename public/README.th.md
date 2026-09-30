@@ -58,7 +58,12 @@ docker compose up -d
 1. เปิด dashboard ของไซต์แรก: <http://127.0.0.1:7420> ไซต์นี้จะเริ่มเครือข่ายใหม่ให้
 2. ไซต์ที่สอง (<http://127.0.0.1:7421>) ยังไม่ได้ตั้งค่าอะไร มันจะหาไซต์แรกในวง LAN เจอเอง แล้วแสดงรหัสจับคู่ 6 หลัก
 3. ที่ dashboard ของไซต์แรก กด **อนุมัติ** คำขอที่รหัสตรงกัน (รหัส admin: `change-me`)
-4. เสร็จแล้ว ไซต์ที่สองจะคัดลอกตารางกับข้อมูลมา แล้วเริ่มซิงก์ ลองเขียนข้อมูลลงฐานข้อมูลฝั่งไหนก็ได้ แล้วดูบน dashboard
+4. เสร็จแล้ว ไซต์ที่สองจะคัดลอกตารางกับข้อมูลมา แล้วเริ่มซิงก์ ลองดู:
+
+   ```bash
+   docker compose exec db-office psql -U postgres -d app -c "INSERT INTO customers (name) VALUES ('hello')"
+   docker compose exec db-branch psql -U postgres -d app -c "SELECT id, name FROM customers"
+   ```
 
 ## ใช้งานบนเซิร์ฟเวอร์จริง
 

@@ -62,8 +62,12 @@ docker compose up -d
    and shows a 6-digit pairing code.
 3. On the first site's dashboard click **Approve** on the join request with the same code
    (admin password: `change-me`).
-4. Done — the second site copies the tables and data and starts syncing. Write to either database and
-   watch the dashboard.
+4. Done — the second site copies the tables and data and starts syncing. Try it:
+
+   ```bash
+   docker compose exec db-office psql -U postgres -d app -c "INSERT INTO customers (name) VALUES ('hello')"
+   docker compose exec db-branch psql -U postgres -d app -c "SELECT id, name FROM customers"
+   ```
 
 ## Running on your own servers
 

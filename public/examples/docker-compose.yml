@@ -6,6 +6,10 @@
 #                                           approve it on the first site's dashboard)
 #   admin password: change-me
 #
+# Write some data and watch it arrive on the other site:
+#   docker compose exec db-office psql -U postgres -d app -c "INSERT INTO customers (name) VALUES ('hello')"
+#   docker compose exec db-branch psql -U postgres -d app -c "SELECT id, name FROM customers"
+#
 # Clean up:  docker compose down -v
 x-postgres: &postgres
   image: postgres:16-alpine
@@ -28,7 +32,6 @@ services:
   db-office:
     <<: *postgres
     volumes: ["./init.sql:/docker-entrypoint-initdb.d/init.sql:ro"]
-    ports: ["127.0.0.1:5432:5432"]
 
   conduit-office:
     <<: *conduit
@@ -44,7 +47,6 @@ services:
   # The second site starts with an empty database and no join settings.
   db-branch:
     <<: *postgres
-    ports: ["127.0.0.1:5433:5432"]
 
   conduit-branch:
     <<: *conduit
