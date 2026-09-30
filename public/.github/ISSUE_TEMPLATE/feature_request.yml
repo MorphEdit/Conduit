@@ -1,0 +1,21 @@
+name: Feature request / ขอฟีเจอร์
+description: Suggest an idea for Conduit
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe your situation (how many sites, what kind of data, what goes wrong today).
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like Conduit to do?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Workarounds you use today

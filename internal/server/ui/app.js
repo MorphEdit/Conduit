@@ -251,6 +251,8 @@
     $('pulse').className = 'status-dot ' + worst;
     $('updated').textContent = (demo ? 'ข้อมูลตัวอย่าง · ' : 'ข้อมูลจริง · ') + 'อัปเดต ' + new Date().toLocaleTimeString('th-TH');
     $('self-node').textContent = '/ ' + m.self;
+    const ver = m.byId[m.self] && m.byId[m.self].st.version;
+    $('version').textContent = ver && ver !== 'dev' ? 'v' + ver : '';
 
     renderCluster(m);
     document.querySelector('.pause-symbol').textContent = paused ? '▷' : 'Ⅱ';

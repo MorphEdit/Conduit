@@ -1,7 +1,8 @@
 // Command conduit keeps Postgres databases on several sites in sync.
 //
-//	conduit              run the site (dashboard on :7420)
+//	conduit              run the site (dashboard on :7420, peers on :7443)
 //	conduit invite       print a one-time invite code for a new site
+//	conduit version      print the version
 package main
 
 import (
@@ -18,6 +19,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/conduit-sync/conduit/internal/buildinfo"
 	"github.com/conduit-sync/conduit/internal/cluster"
 	"github.com/conduit-sync/conduit/internal/config"
 	"github.com/conduit-sync/conduit/internal/node"
@@ -27,6 +29,10 @@ import (
 func main() {
 	cfgPath := flag.String("config", "/etc/conduit/conduit.yaml", "optional config file (CONDUIT_* env vars override it)")
 	flag.Parse()
+	if flag.Arg(0) == "version" {
+		fmt.Println(buildinfo.String())
+		return
+	}
 
 	log := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	cfg, err := config.Load(*cfgPath)
@@ -43,7 +49,7 @@ func main() {
 	case "invite":
 		err = invite(ctx, cfg)
 	default:
-		err = fmt.Errorf("unknown command %q (commands: invite)", flag.Arg(0))
+		err = fmt.Errorf("unknown command %q (commands: invite, version)", flag.Arg(0))
 	}
 	if err != nil && !errors.Is(err, context.Canceled) {
 		log.Error("fatal", "err", err)
@@ -58,6 +64,7 @@ func run(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	httpSrv := &http.Server{Addr: cfg.Listen, Handler: srv.DashboardHandler(), ReadHeaderTimeout: 10 * time.Second}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- httpSrv.ListenAndServe() }()
+	log.Info(buildinfo.String())
 	log.Info("conduit started", "dashboard", cfg.Listen, "peer_port", cfg.PeerListen, "advertise", cfg.Advertise)
 
 	ctx, cancel := context.WithCancel(ctx)

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/conduit-sync/conduit/internal/buildinfo"
 	"github.com/conduit-sync/conduit/internal/change"
 	"github.com/conduit-sync/conduit/internal/cluster"
 	"github.com/conduit-sync/conduit/internal/config"
@@ -182,7 +183,7 @@ func (s *Server) statusData(ctx context.Context) map[string]any {
 	v := s.rt.View()
 	out := map[string]any{
 		"node_id": s.cfg.NodeID, "time": time.Now(), "phase": v.Phase, "advertise": s.cfg.Advertise,
-		"admin_enabled": s.cfg.AdminPassword != "",
+		"admin_enabled": s.cfg.AdminPassword != "", "version": buildinfo.Version,
 	}
 	if v.Notice != "" {
 		out["notice"] = v.Notice

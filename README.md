@@ -1,4 +1,7 @@
-# Conduit
+# Conduit (dev)
+
+> repo นี้เป็น **private** เก็บ source code ของ Conduit — สร้างโดย **MorphEdit**
+> ตัวเผยแพร่สาธารณะ (ไม่มี source code) อยู่ที่ https://github.com/MorphEdit/conduit
 
 ตัวกลางซิงก์ Postgres ระหว่างหลายไซต์ (เช่น host บน cloud, local ในออฟฟิศ, สาขา) ถ้าเน็ตหลุดหรือไซต์ใดล่ม
 ทุกไซต์ยังทำงานต่อได้ แล้วข้อมูลจะตามกันเองเมื่อกลับมาเชื่อมต่อ
@@ -261,3 +264,17 @@ internal/node/       ขั้นตอนเริ่มระบบ: รอ DB
 internal/server/     HTTP + dashboard (ui/ ฝังในไฟล์ binary)
 scripts/test.ps1     ชุดทดสอบ end-to-end
 ```
+
+## เผยแพร่ (release)
+
+repo สาธารณะ [`MorphEdit/conduit`](https://github.com/MorphEdit/conduit) มีแค่คู่มือ ตัวอย่าง และไฟล์โปรแกรม
+เนื้อหาทั้งหมดของ repo นั้นแก้ที่โฟลเดอร์ `public/` ของ repo นี้
+
+```powershell
+# 1. commit ทุกอย่างก่อน แล้ว build ไฟล์โปรแกรมทุกระบบ (Linux/Windows/macOS) + ปล่อย release
+powershell -ExecutionPolicy Bypass -File scriptselease.ps1 -Version 0.1.1 -Publish
+# 2. อัปเดตคู่มือ/ตัวอย่างใน repo สาธารณะ (สคริปต์นี้ไม่ยอมส่งไฟล์ .go ออกไป)
+powershell -ExecutionPolicy Bypass -File scripts\sync-public.ps1 -Message "Docs for v0.1.1"
+```
+
+อย่าลืมแก้ `ARG VERSION` ใน `public/Dockerfile` และ `public/CHANGELOG.md` ให้ตรงเวอร์ชันใหม่

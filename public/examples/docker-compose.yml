@@ -1,0 +1,57 @@
+# Two sites on one machine, for trying Conduit out.
+#
+#   docker compose up -d
+#   first site:   http://127.0.0.1:7420   (founds the cluster, has sample tables)
+#   second site:  http://127.0.0.1:7421   (nothing configured: found on the LAN,
+#                                           approve it on the first site's dashboard)
+#   admin password: change-me
+#
+# Clean up:  docker compose down -v
+x-postgres: &postgres
+  image: postgres:16-alpine
+  command: postgres -c wal_level=logical -c track_commit_timestamp=on
+  environment:
+    POSTGRES_USER: postgres
+    POSTGRES_PASSWORD: postgres
+    POSTGRES_DB: app
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U postgres -d app"]
+    interval: 2s
+    retries: 30
+
+x-conduit: &conduit
+  build: ..
+  image: conduit:local
+  restart: unless-stopped
+
+services:
+  db-office:
+    <<: *postgres
+    volumes: ["./init.sql:/docker-entrypoint-initdb.d/init.sql:ro"]
+    ports: ["127.0.0.1:5432:5432"]
+
+  conduit-office:
+    <<: *conduit
+    environment:
+      CONDUIT_NODE_ID: office
+      CONDUIT_BOOTSTRAP: "true"
+      CONDUIT_DATABASE: postgres://postgres:postgres@db-office:5432/app?sslmode=disable
+      CONDUIT_ADVERTISE: https://conduit-office:7443
+      CONDUIT_ADMIN_PASSWORD: change-me
+    ports: ["127.0.0.1:7420:7420"]
+    depends_on: { db-office: { condition: service_healthy } }
+
+  # The second site starts with an empty database and no join settings.
+  db-branch:
+    <<: *postgres
+    ports: ["127.0.0.1:5433:5432"]
+
+  conduit-branch:
+    <<: *conduit
+    environment:
+      CONDUIT_NODE_ID: branch
+      CONDUIT_DATABASE: postgres://postgres:postgres@db-branch:5432/app?sslmode=disable
+      CONDUIT_ADVERTISE: https://conduit-branch:7443
+      CONDUIT_ADMIN_PASSWORD: change-me
+    ports: ["127.0.0.1:7421:7420"]
+    depends_on: { db-branch: { condition: service_healthy } }

@@ -3,7 +3,11 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/conduit ./cmd/conduit
+ARG VERSION=dev
+ARG COMMIT=
+RUN CGO_ENABLED=0 go build -trimpath \
+    -ldflags="-s -w -X github.com/conduit-sync/conduit/internal/buildinfo.Version=${VERSION} -X github.com/conduit-sync/conduit/internal/buildinfo.Commit=${COMMIT}" \
+    -o /out/conduit ./cmd/conduit
 
 FROM alpine:3.20
 # pg_dump/psql copy table definitions to a newly joining site.

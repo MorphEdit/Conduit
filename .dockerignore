@@ -3,3 +3,5 @@ scripts
 testdata
 config
 *.md
+public
+dist

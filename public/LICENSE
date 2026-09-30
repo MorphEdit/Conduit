@@ -1,0 +1,56 @@
+Conduit Freeware License
+Version 1.0
+
+Copyright (c) 2026 MorphEdit. All rights reserved.
+
+"Software" means the Conduit programs (binaries and container images) that
+MorphEdit publishes, together with their documentation.
+
+1. Permission to use
+   You may download, install and run the Software free of charge, for any
+   purpose, including commercial use inside your own organisation or for
+   your own customers' systems that you operate.
+
+2. Redistribution
+   You may redistribute the Software only unmodified, free of charge, and
+   together with this license and the MorphEdit credit. You may not sell,
+   rent or sublicense the Software on its own.
+
+3. Restrictions
+   You may not:
+   a. modify, adapt or create derivative works of the Software's programs;
+   b. reverse engineer, decompile or disassemble the Software, except to
+      the extent applicable law expressly permits it despite this term;
+   c. remove or change any copyright notice, credit or this license;
+   d. present the Software, or a product based on it, under another name
+      or as your own work.
+
+4. Ownership
+   The Software is licensed, not sold. MorphEdit keeps all rights, title
+   and interest in it, including all intellectual property rights. The
+   source code is not part of this license.
+
+5. Contributions
+   Documentation, examples, issue reports and other material you submit to
+   the public repository may be used, changed and distributed by MorphEdit
+   as part of the Software without obligation to you.
+
+6. No warranty
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+   OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT.
+   You are responsible for backing up your data and for testing the
+   Software before relying on it.
+
+7. Limitation of liability
+   IN NO EVENT SHALL MORPHEDIT BE LIABLE FOR ANY CLAIM, DAMAGES, LOSS OF
+   DATA OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+   OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR
+   ITS USE.
+
+8. Termination
+   This license ends automatically if you break its terms. You must then
+   stop using the Software and delete all copies.
+
+For other licensing arrangements, contact MorphEdit through
+https://github.com/MorphEdit.

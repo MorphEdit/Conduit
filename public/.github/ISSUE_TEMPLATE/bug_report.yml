@@ -1,0 +1,55 @@
+name: Bug report / แจ้งบั๊ก
+description: Something does not work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Please remove passwords, database URLs with passwords and invite codes before posting.
+        ขอบคุณที่แจ้งครับ ก่อนส่งกรุณาลบรหัสผ่านและรหัสเชิญออกก่อน
+  - type: input
+    id: version
+    attributes:
+      label: Conduit version
+      description: Output of `conduit version`
+      placeholder: Conduit 0.1.0 (abc1234) — by MorphEdit
+    validations:
+      required: true
+  - type: input
+    id: postgres
+    attributes:
+      label: PostgreSQL version
+      placeholder: "16.4"
+    validations:
+      required: true
+  - type: dropdown
+    id: run
+    attributes:
+      label: How do you run Conduit?
+      options: [Docker, Linux binary, Windows binary, macOS binary, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start two sites …
+        2. Cut the network …
+        3. …
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      render: text
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else? (screenshots of the dashboard help)

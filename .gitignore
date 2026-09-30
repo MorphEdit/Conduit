@@ -1,4 +1,5 @@
-/conduit
-/conduit.exe
 *.local.yaml
 .env
+/conduit
+/conduit.exe
+/dist/
