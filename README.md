@@ -272,7 +272,7 @@ repo สาธารณะ [`MorphEdit/conduit`](https://github.com/MorphEdit/co
 
 ```powershell
 # 1. commit ทุกอย่างก่อน แล้ว build ไฟล์โปรแกรมทุกระบบ (Linux/Windows/macOS) + ปล่อย release
-powershell -ExecutionPolicy Bypass -File scriptselease.ps1 -Version 0.1.1 -Publish
+powershell -ExecutionPolicy Bypass -File scripts\release.ps1 -Version 0.1.1 -Publish
 # 2. อัปเดตคู่มือ/ตัวอย่างใน repo สาธารณะ (สคริปต์นี้ไม่ยอมส่งไฟล์ .go ออกไป)
 powershell -ExecutionPolicy Bypass -File scripts\sync-public.ps1 -Message "Docs for v0.1.1"
 ```
