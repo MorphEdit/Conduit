@@ -1,0 +1,4 @@
+/conduit
+/conduit.exe
+*.local.yaml
+.env

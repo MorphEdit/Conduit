@@ -1,0 +1,14 @@
+node_id: host
+listen: ":7420"
+token: ${CONDUIT_TOKEN}
+database: postgres://postgres:conduit@pg-host:5432/app?sslmode=disable
+
+capture:
+  enabled: true
+  slot: conduit_slot
+  publication: conduit_pub
+  schemas: [public]
+
+peers:
+  - id: local
+    url: http://conduit-local:7420

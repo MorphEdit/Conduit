@@ -1,0 +1,51 @@
+# Test bench: two Postgres sites and one Conduit per site.
+# Phase 1 = one-way (host -> local).
+x-postgres: &postgres
+  image: postgres:16-alpine
+  command: >
+    postgres
+    -c wal_level=logical
+    -c max_replication_slots=10
+    -c max_wal_senders=10
+  environment:
+    POSTGRES_USER: postgres
+    POSTGRES_PASSWORD: conduit
+    POSTGRES_DB: app
+    TZ: Asia/Bangkok
+  volumes:
+    - ./testdata/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U postgres -d app"]
+    interval: 2s
+    timeout: 3s
+    retries: 30
+
+x-conduit: &conduit
+  build: .
+  environment:
+    CONDUIT_TOKEN: ${CONDUIT_TOKEN:-dev-secret-change-me}
+  restart: unless-stopped
+  mem_limit: 64m
+
+services:
+  pg-host:
+    <<: *postgres
+    ports: ["127.0.0.1:55432:5432"]
+
+  pg-local:
+    <<: *postgres
+    ports: ["127.0.0.1:55433:5432"]
+
+  conduit-host:
+    <<: *conduit
+    volumes: ["./config/host.yaml:/etc/conduit/conduit.yaml:ro"]
+    ports: ["127.0.0.1:7420:7420"]
+    depends_on:
+      pg-host: { condition: service_healthy }
+
+  conduit-local:
+    <<: *conduit
+    volumes: ["./config/local.yaml:/etc/conduit/conduit.yaml:ro"]
+    ports: ["127.0.0.1:7421:7420"]
+    depends_on:
+      pg-local: { condition: service_healthy }

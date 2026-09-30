@@ -1,0 +1,10 @@
+# Phase 1: local only receives. Phase 2 turns on capture and adds host as a peer.
+node_id: local
+listen: ":7420"
+token: ${CONDUIT_TOKEN}
+database: postgres://postgres:conduit@pg-local:5432/app?sslmode=disable
+
+capture:
+  enabled: false
+
+peers: []
