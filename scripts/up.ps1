@@ -1,4 +1,7 @@
-﻿# Start the 3-site bench with sample data and open the dashboard.
+﻿# Copyright 2026 MorphEdit (https://github.com/MorphEdit). All rights reserved.
+# Licensed under the PolyForm Strict License 1.0.0 - see LICENSE and NOTICE.
+# Required Notice: Copyright 2026 MorphEdit (https://github.com/MorphEdit)
+# Start the 3-site bench with sample data and open the dashboard.
 #   host   founds the cluster
 #   local  joins with an invite code
 #   branch joins by LAN discovery; this script approves it (pairing codes checked)

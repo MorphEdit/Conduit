@@ -1,3 +1,6 @@
+# Copyright 2026 MorphEdit (https://github.com/MorphEdit). All rights reserved.
+# Licensed under the PolyForm Strict License 1.0.0 - see LICENSE and NOTICE.
+# Required Notice: Copyright 2026 MorphEdit (https://github.com/MorphEdit)
 # Test bench: three sites. Each site has its own network (site_*) with a
 # Postgres and a Conduit; only the Conduits share the "wan" network, so
 # `docker network disconnect conduit_wan <container>` simulates a site

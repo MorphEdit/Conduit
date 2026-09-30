@@ -1,3 +1,7 @@
+// Copyright 2026 MorphEdit (https://github.com/MorphEdit). All rights reserved.
+// Licensed under the PolyForm Strict License 1.0.0 - see LICENSE and NOTICE.
+// Required Notice: Copyright 2026 MorphEdit (https://github.com/MorphEdit)
+
 // Package apply writes a peer's transactions into the local database and
 // resolves conflicts with last-write-wins on commit timestamps.
 package apply

@@ -1,3 +1,7 @@
+// Copyright 2026 MorphEdit (https://github.com/MorphEdit). All rights reserved.
+// Licensed under the PolyForm Strict License 1.0.0 - see LICENSE and NOTICE.
+// Required Notice: Copyright 2026 MorphEdit (https://github.com/MorphEdit)
+
 // Package node takes a site from "just started" to "syncing": it waits for
 // the database, fixes Postgres settings, joins (or founds) the cluster,
 // copies schema and data if needed, then starts every component.

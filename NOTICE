@@ -1,0 +1,41 @@
+Conduit
+Copyright (c) 2026 MorphEdit. All rights reserved.
+
+Required Notice: Copyright 2026 MorphEdit (https://github.com/MorphEdit)
+
+Conduit is licensed under the PolyForm Strict License 1.0.0 (see LICENSE).
+In short (the LICENSE file is what counts):
+
+  - You may read the source code and run Conduit for personal,
+    educational, research and other noncommercial purposes, and in
+    noncommercial organisations (charities, schools, public bodies).
+  - You may NOT distribute Conduit, change it, or create new works based
+    on it (no forks published as your own project, no renamed copies).
+  - Commercial use needs a separate license from MorphEdit.
+
+Attribution
+-----------
+Every copy and every use must keep the credit to MorphEdit:
+  - this NOTICE file and the "Required Notice" line above,
+  - the copyright header at the top of each source file,
+  - the "by MorphEdit" credit shown by `conduit version`, in the logs and
+    in the dashboard footer.
+Do not present Conduit, or anything built from its code, as your own work
+or under another name.
+
+Additional permissions from MorphEdit
+-------------------------------------
+On top of the LICENSE, MorphEdit also permits you to:
+  1. make changes to the source code solely to prepare a contribution
+     (issue or pull request) to https://github.com/MorphEdit/conduit, and
+     to keep a fork on GitHub only for that purpose;
+  2. build Conduit from this unmodified source code (including container
+     images) for a purpose the LICENSE permits.
+Contributions you submit may be used, changed and distributed by MorphEdit
+as part of Conduit under any terms, without obligation to you.
+
+Commercial licenses and questions
+---------------------------------
+Want to use Conduit in a business, or need other terms?
+Email: morphofficialedit@gmail.com
+Issues and bugs: https://github.com/MorphEdit/conduit/issues

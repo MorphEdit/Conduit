@@ -1,280 +1,181 @@
-# Conduit (dev)
+<div align="center">
 
-> repo นี้เป็น **private** เก็บ source code ของ Conduit — สร้างโดย **MorphEdit**
-> ตัวเผยแพร่สาธารณะ (ไม่มี source code) อยู่ที่ https://github.com/MorphEdit/conduit
+# Conduit
 
-ตัวกลางซิงก์ Postgres ระหว่างหลายไซต์ (เช่น host บน cloud, local ในออฟฟิศ, สาขา) ถ้าเน็ตหลุดหรือไซต์ใดล่ม
-ทุกไซต์ยังทำงานต่อได้ แล้วข้อมูลจะตามกันเองเมื่อกลับมาเชื่อมต่อ
+**Keep Postgres databases on several sites in sync — and keep working when the internet drops.**
 
-Conduit **ไม่ใช่ database** ข้อมูลจริงอยู่ใน Postgres ของแต่ละไซต์ แอปยังต่อ Postgres ตรงเหมือนเดิม
-Conduit แค่คอยดูว่ามีอะไรเปลี่ยน แล้วส่งให้ไซต์อื่น
+Made by **[MorphEdit](https://github.com/MorphEdit)** · [ภาษาไทย](README.th.md)
 
-## สถานะ
+[![License: PolyForm Strict 1.0.0](https://img.shields.io/badge/license-PolyForm%20Strict%201.0.0-6de7ce)](LICENSE)
+&nbsp;source-available · free for personal & noncommercial use · [commercial license](#license)
 
-| เฟส | เนื้อหา | สถานะ |
-|---|---|---|
-| 1 | ซิงก์ทางเดียว, คิวถาวร, retry, ไม่ส่งซ้ำ | ✅ |
-| 2 | ซิงก์สองทาง/หลายไซต์, กันซิงก์วน, แยกเลข ID ตามไซต์ | ✅ |
-| 3 | last-write-wins, tombstone, ตาราง owner-only, บันทึก conflict | ✅ |
-| 4 | node ใหม่เข้าร่วมด้วย snapshot | ✅ |
-| 5 | ชุดทดสอบตัดเน็ตจริง 3 ไซต์ | ✅ |
-| + | Dashboard แบบ isometric | ✅ |
-| + | เพิ่ม/ถอดไซต์อัตโนมัติ (รหัสเชิญ, LAN + อนุมัติ, ตั้งค่า Postgres, คัดลอกตาราง) | ✅ |
-| + | TLS ระหว่างไซต์ + กุญแจแยกรายไซต์ (ถอดไซต์ = ตัดสิทธิ์ทันที) | ✅ |
+</div>
 
-## ภาพรวม
+---
 
-```
-        ไซต์ host                    ไซต์ local                   ไซต์ branch
-  app → Postgres ← Conduit ◄──WAN──► Conduit → Postgres ← app      ...
-                      ▲                                  ▲
-                      └──────────────WAN─────────────────┘   (full mesh)
-```
+Conduit sits next to each site's Postgres (cloud server, office, branch…). Every site keeps working on
+its own database even when the link between sites is down; when the link comes back, Conduit sends the
+changes that piled up and every site ends up with the same data.
 
-ทุกไซต์เขียนได้ ทุก Conduit ส่ง change ของไซต์ตัวเองไปหา peer ทุกตัวโดยตรง
+Conduit is **not a database**. Your data stays in Postgres and your application talks to Postgres
+exactly as before — no code changes. Conduit reads what changed and delivers it to the other sites.
 
-### เส้นทางของ 1 transaction
+## Features
+
+- **Works offline** — each site writes locally; changes queue up and are delivered when the link returns.
+- **Multi-site, every direction** — host ⇄ office ⇄ branch; any site can write.
+- **Conflict handling** — last write wins by commit time, delete/update races handled with tombstones,
+  every conflict recorded for review.
+- **Owner-only tables** — mark tables (stock, ledger, payroll…) as writable on one site only.
+- **Adding a site is almost automatic** — found on the LAN and approved with one click, or joined with a
+  one-time invite code. Conduit configures Postgres, copies the table structure and the data by itself.
+- **Secure between sites** — TLS 1.3 with pinned certificates, a separate key for every site,
+  removing a site revokes it immediately.
+- **Live dashboard** — isometric map of every site and link, queues, conflicts, invites and approvals.
+- **Tiny** — one small program, ~6 MB of RAM per site.
+
+## How it works
 
 ```
 [Postgres A]                                        [Postgres B]
-  │ ① แอปเขียนข้อมูล                                     ▲
-  ▼                                                     │ ⑤ เขียนลง DB ใน transaction เดียว
- WAL ─② capture (logical replication, pgoutput)          │   + บันทึก applied_seq
-  ▼                                                     │   + ประทับเวลา commit ของต้นทาง
- ③ conduit.outbox (1 แถว = 1 transaction) ─④ POST ─► /v1/apply
+  │ ① your app writes                                    ▲
+  ▼                                                     │ ⑤ applied in one transaction,
+ WAL ─② Conduit reads the change (logical replication)   │   stamped with the origin's commit time
+  ▼                                                     │
+ ③ queued in the outbox ──④ HTTPS (TLS 1.3, pinned) ──► Conduit B
   ▲                                                     │
-  └───────────── ⑥ ack { applied: seq } ◄──────────────┘
-                 ⑦ เลื่อน cursor ของ peer นั้น, ลบแถวที่ทุก peer รับแล้ว
+  └──────────────── ⑥ "got everything up to #120" ◄─────┘
 ```
 
-| คุณสมบัติ | ทำยังไง |
-|---|---|
-| ไม่หาย | ยืนยันตำแหน่ง replication slot หลังเขียน outbox สำเร็จเท่านั้น ถ้า Conduit ดับ Postgres เก็บ WAL รอไว้ |
-| ไม่เบิ้ล | outbox unique ที่ `lsn`, ฝั่งรับเก็บ `applied_seq` ใน transaction เดียวกับข้อมูล |
-| ไม่วน | ฝั่งรับติด replication origin `conduit_<node>`, capture ใช้ `origin 'none'` จึงไม่ส่งของที่รับมาต่อ |
-| ไม่ยิง trigger ซ้ำ | ฝั่งรับใช้ `session_replication_role = replica` (เหมือน apply worker ของ Postgres) |
-| ID ไม่ชน | แต่ละไซต์ออกเลขในกลุ่มของตัวเอง: `id % step == offset` |
-| retry | 1s → 2s → 4s … สูงสุด 30s |
+Conduit never compares whole databases. It reads Postgres' own change log (WAL), so it knows exactly
+what was inserted, updated or deleted, in which order and when. See [docs/how-it-works.md](docs/how-it-works.md).
 
-## การจัดการ conflict
+## Quick start (Docker)
 
-ใช้ **last-write-wins ตามเวลา commit ของต้นทาง** (`track_commit_timestamp`) ทุกไซต์เทียบเวลาชุดเดียวกัน จึงได้ผลลัพธ์เดียวกันเสมอ
-
-| เหตุการณ์ (ระหว่างเน็ตหลุด) | ผลลัพธ์ | บันทึกเป็น |
-|---|---|---|
-| A แก้แถว X, B แก้แถว X ทีหลัง | ของ B ชนะทุกไซต์ | `update_update` (ที่ A) |
-| A ลบแถว X, B แก้ X ทีหลัง | X กลับมาพร้อมค่าของ B | `update_delete` |
-| B แก้ X, A ลบ X ทีหลัง | X หายทุกไซต์ | `delete_update` (ใช้ tombstone) |
-| A และ B สร้างแถวที่ชน unique (เช่น code ซ้ำ) | ข้ามแถวนั้น คิวเดินต่อ **ต้องแก้เอง** | `unique_violation` |
-| ไซต์ที่ไม่ใช่เจ้าของเขียนตาราง owner-only | DB ปฏิเสธทันที (trigger) | `owner_violation` ถ้าหลุดมา |
-
-ทุก conflict อยู่ในตาราง `conduit.conflicts` และดูได้ที่ `/status`
-
-**แก้ unique conflict เอง:** ลบแถวที่ไม่ต้องการในไซต์ที่มันอยู่ แล้วสั่ง `UPDATE ... SET col = col` กับแถวที่จะเก็บ
-ในไซต์ของมัน เพื่อให้ Conduit ส่งแถวนั้นไปใหม่
-
-**ตาราง owner-only:** เหมาะกับข้อมูลที่ห้ามแยกกันเขียน เช่น สต็อก บัญชี เงินเดือน ไซต์อื่นอ่านได้และได้รับข้อมูล แต่เขียนไม่ได้
-(ตอนเจ้าของล่ม ตารางนั้นจะเขียนไม่ได้ชั่วคราว เพื่อกันยอดเพี้ยน)
-
-## เพิ่มไซต์ใหม่ (อัตโนมัติ)
-
-ไซต์ใหม่ใส่แค่ **ที่อยู่ฐานข้อมูล** ที่เหลือ Conduit ทำเองทั้งหมด
-
-| ขั้น | ทำเองไหม |
-|---|---|
-| ตั้งชื่อไซต์ (จากชื่อเครื่อง) | อัตโนมัติ |
-| ตั้งค่า Postgres (`wal_level`, `track_commit_timestamp`) | อัตโนมัติ + **restart Postgres 1 ครั้ง** ถ้าเป็นฐานข้อมูลเดิม |
-| หาไซต์อื่น | ในวง LAN: อัตโนมัติ · ต่างที่: แปะรหัสเชิญ |
-| ได้เลขชุด ID ที่ไม่ซ้ำ | อัตโนมัติ |
-| สร้างตาราง (ถ้าฐานข้อมูลว่าง) | อัตโนมัติ (`pg_dump --schema-only` จากไซต์เดิม) |
-| ดึงข้อมูลทั้งหมด | อัตโนมัติ (snapshot) |
-| ไซต์เดิมรู้จักไซต์ใหม่ | อัตโนมัติ (แลกรายชื่อกันทุก 10 วินาที ไม่ต้อง restart) |
-| กฎตาราง owner-only | อัตโนมัติ (แชร์ทั้งเครือข่าย) |
-
-### ไซต์แรก
+Try two sites on one machine:
 
 ```bash
-CONDUIT_DATABASE=postgres://… CONDUIT_BOOTSTRAP=true CONDUIT_ADMIN_PASSWORD=… conduit
+git clone https://github.com/MorphEdit/conduit.git
+cd conduit/examples
+docker compose up -d
 ```
 
-### ไซต์ถัดไป — ในวง LAN เดียวกัน
+1. Open the first site's dashboard: <http://127.0.0.1:7420> — it founded a new cluster.
+2. The second site (<http://127.0.0.1:7421>) has nothing configured. It finds the first one on the LAN
+   and shows a 6-digit pairing code.
+3. On the first site's dashboard click **Approve** on the join request with the same code
+   (admin password: `change-me`).
+4. Done — the second site copies the tables and data and starts syncing. Try it:
 
-1. เปิด Conduit ที่มีแค่ `CONDUIT_DATABASE` (และ `CONDUIT_ADMIN_PASSWORD`)
-2. หน้า dashboard ของไซต์ใหม่แสดง **รหัสจับคู่ 6 หลัก**
-3. ที่ dashboard ของไซต์เดิมจะขึ้น "ไซต์ใหม่ขอเข้าร่วม" — ดูว่ารหัสตรงกัน แล้วกด **อนุมัติ**
+   ```bash
+   docker compose exec db-office psql -U postgres -d app -c "INSERT INTO customers (name) VALUES ('hello')"
+   docker compose exec db-branch psql -U postgres -d app -c "SELECT id, name FROM customers"
+   ```
 
-### ไซต์ถัดไป — ต่างที่ (ข้ามอินเทอร์เน็ต)
+## Running on your own servers
 
-1. ที่ dashboard ไซต์เดิม กด **＋ เพิ่มไซต์** → ได้รหัสเชิญ `cdt1_…` (ใช้ได้ครั้งเดียว, 24 ชม.)
-   หรือใช้คำสั่ง `conduit invite`
-2. ที่ไซต์ใหม่: ตั้ง `CONDUIT_JOIN=<รหัส>` หรือแปะรหัสในหน้า dashboard ของมัน
+Conduit is built from this source code — the easiest way is Docker:
 
-### ถอดไซต์ออก
+```bash
+git clone https://github.com/MorphEdit/conduit.git
+cd conduit
+docker build -t conduit .
+```
 
-เลือกไซต์บน dashboard → **ถอดไซต์นี้ออก** ทุกไซต์จะหยุดส่งข้อมูลให้ และคิวจะไม่ค้างรอไซต์นั้นอีก
-(เลขชุด ID ของไซต์ที่ถอดออกจะไม่ถูกนำกลับมาใช้ เพราะแถวที่ไซต์นั้นเคยสร้างยังอยู่)
+(Without Docker: install Go 1.25 and run `go build -o conduit ./cmd/conduit`.
+Copying table structure to new sites also needs `pg_dump`/`psql` 16, which the Docker image includes.)
 
-## ความปลอดภัย
+**First site** — founds the cluster:
 
-ไม่ต้องตั้งค่าอะไรเพิ่ม ทุกอย่างสร้างให้เองตอนเข้าร่วม
+```bash
+docker run -d --name conduit --restart unless-stopped -p 7420:7420 -p 7443:7443 \
+  -e CONDUIT_DATABASE="postgres://user:pass@db-host:5432/app" \
+  -e CONDUIT_BOOTSTRAP=true \
+  -e CONDUIT_ADMIN_PASSWORD="choose-a-password" \
+  -e CONDUIT_ADVERTISE="https://this-site.example.com:7443" \
+  conduit
+```
 
-| เรื่อง | ทำยังไง |
+**Every other site** — needs only its database and a way in:
+
+| Where is the new site? | What you do |
 |---|---|
-| **เข้ารหัส** | ไซต์คุยกันผ่าน HTTPS (TLS 1.3) ที่พอร์ต `7443` เท่านั้น HTTP ธรรมดาจะถูกปฏิเสธ |
-| **ตัวจริงหรือตัวปลอม** | ทุกไซต์สร้างใบรับรองของตัวเอง ไซต์อื่น**จำลายนิ้วมือ**ไว้ (แบบ `known_hosts` ของ SSH) ใบรับรองไม่ตรง = ไม่คุย ไม่ต้องซื้อใบรับรองหรือตั้ง CA |
-| **รหัสเชิญ** | มีลายนิ้วมือของไซต์ที่ออกรหัสอยู่ในตัว ไซต์ใหม่จึงรู้ว่าต่อถูกเครื่อง |
-| **กุญแจแยกรายไซต์** | แต่ละไซต์มี secret ของตัวเอง ไซต์อื่นเก็บแค่ hash (secret ไม่เคยถูกส่งออกจากเครื่อง) |
-| **ปลอมตัวไม่ได้** | ข้อมูลที่ส่งมาต้องเป็นของไซต์ที่ยืนยันตัวตนมาเท่านั้น (`origin` ต้องตรง) |
-| **ถอดไซต์ = ตัดสิทธิ์ทันที** | ทุกไซต์ปฏิเสธกุญแจของไซต์ที่ถูกถอดทันทีที่ข่าวไปถึง (ไม่เกิน ~10 วินาที) ไม่ต้องเปลี่ยนกุญแจของใคร |
+| Same LAN | Start it. Approve the join request (matching pairing code) on any running site's dashboard. |
+| Anywhere else | Click **＋ Add site** on a dashboard (or run `docker exec conduit conduit invite`) and give the code to the new site: `-e CONDUIT_JOIN=cdt1_…` or paste it on its dashboard. |
+| Existing Postgres without the right settings | Conduit sets them itself and asks you to **restart Postgres once**. |
 
-พอร์ต:
+Everything else is automatic: site name, unique id range, table structure (if the database is empty),
+the initial copy of all data, and every other site learning about the new one.
 
-| พอร์ต | ใช้ทำอะไร | ควรเปิดให้ใคร |
+## Configuration
+
+All settings are environment variables; a YAML file (`/etc/conduit/conduit.yaml`) is optional.
+
+| Variable | Default | Meaning |
 |---|---|---|
-| `7443` (TCP, HTTPS) | ไซต์คุยกัน | ไซต์อื่นในเครือข่าย (เปิดผ่านอินเทอร์เน็ตได้) |
-| `7420` (TCP, HTTP) | dashboard + ปุ่ม admin | เฉพาะใน LAN หรือหลัง reverse proxy ที่มี TLS |
-| `7420` (UDP) | ค้นหากันในวง LAN | เฉพาะใน LAN |
+| `CONDUIT_DATABASE` | — (required) | This site's Postgres |
+| `CONDUIT_ADMIN_PASSWORD` | — | Enables dashboard actions (invite, approve, remove) |
+| `CONDUIT_BOOTSTRAP` | `false` | `true` on the first site only |
+| `CONDUIT_JOIN` | — | Invite code `cdt1_…` |
+| `CONDUIT_NODE_ID` | host name | Site name (a–z, 0–9, _) |
+| `CONDUIT_ADVERTISE` | `https://<host>:7443` | Address other sites use to reach this one |
+| `CONDUIT_LISTEN` | `:7420` | Dashboard (LAN discovery uses UDP 7420) |
+| `CONDUIT_PEER_LISTEN` | `:7443` | HTTPS port for other sites |
+| `CONDUIT_DISCOVERY` | `true` | Find / announce on the LAN |
 
-## Config
+More (owner-only tables, retention…) in [docs/configuration.md](docs/configuration.md).
 
-ทุกค่าตั้งผ่าน env ได้ ไฟล์ YAML (`/etc/conduit/conduit.yaml`) ไม่จำเป็น
+## Requirements
 
-| env | ค่าเริ่มต้น | ความหมาย |
+- PostgreSQL **16+** (`wal_level=logical`, `track_commit_timestamp=on` — Conduit sets these for you)
+- A superuser for Conduit
+- Every table needs a primary key; the schema must be the same on every site
+  (new, empty sites get it copied automatically — needs `pg_dump`/`psql` 16, included in the Docker image)
+- Clocks in sync (NTP)
+
+## Ports
+
+| Port | Purpose | Open to |
 |---|---|---|
-| `CONDUIT_DATABASE` | — (ต้องใส่) | Postgres ของไซต์นี้ |
-| `CONDUIT_ADMIN_PASSWORD` | — | เปิดปุ่มบน dashboard (เชิญ / อนุมัติ / ถอด) |
-| `CONDUIT_BOOTSTRAP` | `false` | `true` = ไซต์นี้เริ่มเครือข่ายใหม่ |
-| `CONDUIT_JOIN` | — | รหัสเชิญ `cdt1_…` |
-| `CONDUIT_NODE_ID` | ชื่อเครื่อง | ชื่อไซต์ (a-z 0-9 _) |
-| `CONDUIT_ADVERTISE` | `https://<ชื่อเครื่อง>:7443` | ที่อยู่ที่ไซต์อื่นใช้ติดต่อ |
-| `CONDUIT_LISTEN` | `:7420` | dashboard (LAN discovery ใช้ UDP 7420) |
-| `CONDUIT_PEER_LISTEN` | `:7443` | พอร์ต HTTPS ที่ไซต์อื่นใช้ |
-| `CONDUIT_DISCOVERY` | `true` | ค้นหา/ประกาศตัวในวง LAN |
+| `7443/tcp` | Sites talk to each other (HTTPS) | Other sites — safe to expose to the internet |
+| `7420/tcp` | Dashboard + admin actions (HTTP) | Your LAN only, or put a TLS reverse proxy in front |
+| `7420/udp` | LAN discovery | Your LAN only |
 
-ตัวอย่าง YAML (ตั้งที่ไซต์ไหนก็ได้ แล้วจะแชร์ทั้งเครือข่าย):
+## Good to know
 
-```yaml
-tables:
-  stock_lots: { owner: host }   # เขียนได้ที่ host เท่านั้น
-tombstone_ttl: 168h              # ต้องนานกว่าช่วงเน็ตหลุดที่นานที่สุด
-outbox_retention: 1h             # เก็บ change ที่ส่งแล้วไว้ช่วงหนึ่ง เผื่อไซต์ที่กำลังเข้าร่วม
-```
+- Business numbers your application generates itself (invoice / PO numbers, custom counters) are not
+  coordinated by Conduit — use a per-site prefix or make that table owner-only.
+- Last write wins per row: if two sites change different columns of the same row at the same time,
+  the later change wins as a whole.
+- Conduit syncs rows, not DDL or `TRUNCATE`: change the schema on every site yourself.
+- Files your application stores outside the database are not synced.
 
-## Dashboard
+## Support
 
-เปิด `http://<conduit>:7420/` ได้จากทุกไซต์ จะเห็นผัง isometric ของทุกไซต์ พร้อมเส้นซิงก์ที่อัปเดตทุก 2 วินาที
+- **Bugs & feature requests:** [open an issue](https://github.com/MorphEdit/conduit/issues/new/choose)
+- **Improvements to the docs or examples:** pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md)
+- **Security problems:** please report privately — see [SECURITY.md](SECURITY.md)
 
-- แต่ละไซต์แสดง Postgres + Conduit และเส้น capture ระหว่างสองตัว
-- สีเส้น: เขียว = ซิงก์แล้ว, ส้ม = มีคิวรอส่ง, ส้มประ = กำลัง retry, แดงประ = ขาดการเชื่อมต่อ
-- คลิกไซต์เพื่อดูคิว, backlog ต่อ peer, error ล่าสุด และ conflict
-- เปิดไฟล์ตรงๆ หรือใส่ `?demo` จะเห็นข้อมูลตัวอย่าง (จำลอง local เน็ตหลุดทุก 20 วินาที)
+## License
 
-ข้อมูลมาจาก `GET /v1/mesh` ซึ่งรวม `/status` ของไซต์ตัวเองกับทุก peer
-`/`, `/status` และ `/v1/mesh` ไม่ต้องใช้ token ถ้าเปิดพอร์ตออกอินเทอร์เน็ตควรมี reverse proxy ที่ใส่ auth ไว้หน้า
+Conduit is **source-available** under the **[PolyForm Strict License 1.0.0](LICENSE)**, with the
+attribution rules in [NOTICE](NOTICE). The LICENSE is what counts; in short:
 
-## HTTP
-
-**Dashboard (`:7420`)**
-
-| Endpoint | ใช้ทำอะไร |
+| ✅ You may | ❌ You may not |
 |---|---|
-| `GET /` | dashboard |
-| `GET /health`, `GET /status` | สถานะของไซต์นี้ |
-| `GET /v1/mesh` | สถานะของทุกไซต์รวมกัน |
-| `POST /v1/admin/…` | สร้างรหัสเชิญ, อนุมัติ/ปฏิเสธ, ถอดไซต์, แปะรหัสเชิญ (ต้องมีรหัส admin) |
+| Read the code and learn from it | Use it commercially without a license from MorphEdit |
+| Use Conduit for personal, educational, research and other noncommercial purposes | Publish a modified version, a renamed copy or a fork of your own |
+| Use it in noncommercial organisations (charities, schools, public bodies) | Distribute Conduit or build new works from its code |
+| Build it from this unmodified source, and send issues or pull requests | Remove or change the MorphEdit credit, or present it as your own |
 
-**ระหว่างไซต์ (`:7443`, TLS)** — ต้องส่ง `Authorization: Conduit <site>:<secret>`
+**Using Conduit in a business?** Email **morphofficialedit@gmail.com** for a commercial license.
 
-| Endpoint | ใช้ทำอะไร |
-|---|---|
-| `POST /v1/apply` | ส่ง change ของไซต์ตัวเอง |
-| `GET /v1/snapshot` | ไซต์ใหม่ดึงข้อมูลทั้งหมด |
-| `GET /v1/members` | แลกรายชื่อสมาชิก |
-| `GET /v1/schema` | โครงสร้างตารางสำหรับไซต์ใหม่ |
-| `GET /status` | สถานะ (ใช้โดย `/v1/mesh`) |
-| `POST /v1/join` | ใช้รหัสเชิญเข้าร่วม (ไม่ต้องมี secret) |
-| `POST /v1/join-requests` | ไซต์ใน LAN ขอเข้าร่วม (รออนุมัติ) |
+AI assistants and coding agents working with this code must follow [AGENTS.md](AGENTS.md).
 
-## ทดสอบ
+---
 
-ต้องมีแค่ Docker ไม่ต้องลง Go
+<div align="center">
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\up.ps1            # เปิด 3 ไซต์ + ข้อมูลตัวอย่าง + เปิด dashboard
-powershell -ExecutionPolicy Bypass -File scripts\test.ps1          # ชุดทดสอบ (ใส่ -Keep ถ้าอยากให้รันค้างไว้)
-```
+**Conduit** — made with care by **[MorphEdit](https://github.com/MorphEdit)**
 
-test bench มี 3 ไซต์ แต่ละไซต์มี network ของตัวเอง มีแค่ Conduit ที่ต่อ network `conduit_wan`
-การตัดเน็ตจึงใช้ `docker network disconnect` จริง ขณะที่ฐานข้อมูลในไซต์ยังใช้ได้
-
-| # | ทดสอบ |
-|---|---|
-| 0 | host เริ่มเครือข่าย · local เข้าร่วมด้วยรหัสเชิญ (ฐานข้อมูลว่าง → คัดลอกตาราง) · รหัสใช้ซ้ำไม่ได้ |
-| 1 | host → local ครบทุกชนิดข้อมูล (ไทย, array, jsonb, bytea, numeric, date, composite key, identity) |
-| 2 | local → host และเลข ID แยกตามไซต์ |
-| 3 | ไม่มีการส่งวนกลับ |
-| 4 | ตัดเน็ตแล้วทั้งสองฝั่ง insert ต่อ → รวมกันได้ ID ไม่ชน |
-| 5 | แก้แถวเดียวกันทั้งสองฝั่ง → อันหลังชนะ |
-| 6 | ลบ vs แก้ ทั้งสองลำดับ |
-| 7 | ตาราง owner-only |
-| 8 | unique conflict → คิวไม่ค้าง + แก้เองแล้วกลับมาตรงกัน |
-| 9 | ปิด Conduit / Postgres แต่ละฝั่ง |
-| 10 | branch ไม่ได้ตั้งค่าอะไร + Postgres ยังไม่พร้อม → ตั้งค่าเอง → หา host ใน LAN → อนุมัติ → ซิงก์สามทาง |
-| 11 | TLS บังคับ, secret ผิด, ปลอมตัวเป็นไซต์อื่น, ต้องยืนยันตัวตน, ส่ง seq เก่าซ้ำ |
-| 12 | dashboard และ `/v1/mesh` |
-| 13 | ถอดไซต์ออก → กุญแจใช้ไม่ได้ทันทีทุกไซต์ + ไซต์นั้นรู้ตัวและหยุด |
-
-## ข้อกำหนดของ Postgres
-
-- Postgres 16+ พร้อม `wal_level=logical` และ `track_commit_timestamp=on` (ต้อง restart)
-- user ของ Conduit ต้องเป็น superuser (publication, slot, replication origin, `session_replication_role`, `ALTER SYSTEM`)
-- Conduit ใช้ `pg_dump`/`psql` เวอร์ชัน 16 คัดลอกตาราง ถ้า Postgres เป็นเวอร์ชันอื่น ให้สร้างตารางเองก่อนเข้าร่วม
-- ทุกตารางต้องมี primary key
-- schema ต้องเหมือนกันทุกไซต์ Conduit ไม่ซิงก์ DDL และไม่ซิงก์ `TRUNCATE` ให้แก้ schema ทุกไซต์เอง
-  แล้ว restart Conduit (sequence ของตารางใหม่จะถูกจัดให้ตอนเริ่ม)
-- นาฬิกาทุกเครื่องต้องตรงกัน (NTP) เพราะ last-write-wins เทียบเวลา
-
-## ข้อจำกัดที่รู้อยู่
-
-- **ตัวนับที่แอปทำเอง** เช่น ตาราง `doc_counters` ออกเลขเอกสาร Conduit แยกให้ไม่ได้ ต้องใส่ prefix ตามไซต์
-  หรือตั้งเป็น owner-only
-- last-write-wins ทั้งแถว: ถ้า A แก้คอลัมน์ 1 และ B แก้คอลัมน์ 2 ของแถวเดียวกันพร้อมกัน จะเหลือแค่ของอันหลัง
-- ถ้าเวลา commit ตรงกันถึงระดับไมโครวินาที ผลอาจไม่แน่นอน (เกิดได้ยากมาก)
-- ไซต์ที่ปิดถาวรทำให้ outbox ไม่ถูกลบ — กดถอดออกบน dashboard
-- LAN discovery ใช้ UDP broadcast เจอเฉพาะเครื่องในวงเดียวกัน (ข้าม router ไม่ได้ ใช้รหัสเชิญแทน)
-- ถ้าสองไซต์ใหม่เข้าร่วมพร้อมกันผ่านคนละไซต์ อาจได้เลขชุด ID เดียวกัน dashboard จะเตือน ให้ถอดไซต์หนึ่งแล้วเชิญใหม่
-- transaction ใหญ่มากจะถูกเก็บในหน่วยความจำก่อนเขียน outbox
-- dashboard (`:7420`) เป็น HTTP ธรรมดา ถ้าจะเปิดออกนอก LAN ให้วาง reverse proxy ที่มี TLS ไว้หน้า
-- ค้นหาใน LAN ครั้งแรกเชื่อลายนิ้วมือจาก broadcast (เหมือน SSH ครั้งแรก) ถ้า LAN ไม่น่าไว้ใจ ให้ใช้รหัสเชิญแทน
-
-## โครงสร้าง
-
-```
-cmd/conduit/         main + คำสั่ง `conduit invite`
-internal/config/     โหลด YAML (+ ${ENV})
-internal/capture/    อ่าน WAL → outbox (+ tombstone ของการลบ)
-internal/store/      ตาราง conduit.* (outbox, cursor, inbox, tombstones, conflicts)
-internal/sender/     ส่ง outbox ไปหา peer แต่ละตัว
-internal/apply/      เขียน change ของ peer + last-write-wins
-internal/policy/     จัด sequence ตามไซต์, trigger owner-only
-internal/snapshot/   ส่ง/รับ snapshot
-internal/cluster/    สมาชิก, gossip, รหัสเชิญ, LAN discovery, คำขอเข้าร่วม, ใบรับรอง TLS
-internal/peer/       การเชื่อมต่อระหว่างไซต์: TLS ที่ตรวจลายนิ้วมือ + กุญแจรายไซต์
-internal/node/       ขั้นตอนเริ่มระบบ: รอ DB → ตั้งค่า Postgres → เข้าร่วม → ซิงก์
-internal/server/     HTTP + dashboard (ui/ ฝังในไฟล์ binary)
-scripts/test.ps1     ชุดทดสอบ end-to-end
-```
-
-## เผยแพร่ (release)
-
-repo สาธารณะ [`MorphEdit/conduit`](https://github.com/MorphEdit/conduit) มีแค่คู่มือ ตัวอย่าง และไฟล์โปรแกรม
-เนื้อหาทั้งหมดของ repo นั้นแก้ที่โฟลเดอร์ `public/` ของ repo นี้
-
-```powershell
-# 1. commit ทุกอย่างก่อน แล้ว build ไฟล์โปรแกรมทุกระบบ (Linux/Windows/macOS) + ปล่อย release
-powershell -ExecutionPolicy Bypass -File scripts\release.ps1 -Version 0.1.1 -Publish
-# 2. อัปเดตคู่มือ/ตัวอย่างใน repo สาธารณะ (สคริปต์นี้ไม่ยอมส่งไฟล์ .go ออกไป)
-powershell -ExecutionPolicy Bypass -File scripts\sync-public.ps1 -Message "Docs for v0.1.1"
-```
-
-อย่าลืมแก้ `ARG VERSION` ใน `public/Dockerfile` และ `public/CHANGELOG.md` ให้ตรงเวอร์ชันใหม่
+</div>

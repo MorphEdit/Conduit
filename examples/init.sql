@@ -1,3 +1,7 @@
+-- Copyright 2026 MorphEdit (https://github.com/MorphEdit). All rights reserved.
+-- Licensed under the PolyForm Strict License 1.0.0 - see LICENSE and NOTICE.
+-- Required Notice: Copyright 2026 MorphEdit (https://github.com/MorphEdit)
+
 -- Sample tables for the example. Every synced table needs a primary key.
 CREATE TABLE customers (
     id         SERIAL PRIMARY KEY,

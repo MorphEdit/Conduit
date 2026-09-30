@@ -3,5 +3,6 @@ scripts
 testdata
 config
 *.md
-public
-dist
+examples
+docs
+.github

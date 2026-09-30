@@ -1,3 +1,7 @@
+// Copyright 2026 MorphEdit (https://github.com/MorphEdit). All rights reserved.
+// Licensed under the PolyForm Strict License 1.0.0 - see LICENSE and NOTICE.
+// Required Notice: Copyright 2026 MorphEdit (https://github.com/MorphEdit)
+
 // Package peer is how one site talks to another: TLS pinned to the other
 // site's certificate fingerprint, authenticated with this site's own secret.
 package peer

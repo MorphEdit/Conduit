@@ -1,3 +1,7 @@
+// Copyright 2026 MorphEdit (https://github.com/MorphEdit). All rights reserved.
+// Licensed under the PolyForm Strict License 1.0.0 - see LICENSE and NOTICE.
+// Required Notice: Copyright 2026 MorphEdit (https://github.com/MorphEdit)
+
 // Package snapshot copies a peer's full table contents to a new node so it
 // can join sync without replaying history.
 //

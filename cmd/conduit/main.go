@@ -1,3 +1,7 @@
+// Copyright 2026 MorphEdit (https://github.com/MorphEdit). All rights reserved.
+// Licensed under the PolyForm Strict License 1.0.0 - see LICENSE and NOTICE.
+// Required Notice: Copyright 2026 MorphEdit (https://github.com/MorphEdit)
+
 // Command conduit keeps Postgres databases on several sites in sync.
 //
 //	conduit              run the site (dashboard on :7420, peers on :7443)

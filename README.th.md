@@ -6,6 +6,9 @@
 
 สร้างโดย **[MorphEdit](https://github.com/MorphEdit)** · [English](README.md)
 
+[![License: PolyForm Strict 1.0.0](https://img.shields.io/badge/license-PolyForm%20Strict%201.0.0-6de7ce)](LICENSE)
+&nbsp;เปิดให้ดูโค้ด · ใช้ฟรีสำหรับส่วนตัว/ไม่แสวงกำไร · [license ธุรกิจ](#license)
+
 </div>
 
 ---
@@ -27,7 +30,7 @@ Conduit **ไม่ใช่ฐานข้อมูล** ข้อมูลจ�
   และดึงข้อมูลให้เอง
 - **ปลอดภัยระหว่างไซต์** — TLS 1.3 ที่ตรวจลายนิ้วมือใบรับรอง แต่ละไซต์มีกุญแจของตัวเอง ถอดไซต์ออก = ตัดสิทธิ์ทันที
 - **Dashboard แบบเรียลไทม์** — ผังทุกไซต์และทุกเส้นเชื่อม คิว conflict รหัสเชิญ และปุ่มอนุมัติ
-- **เล็กมาก** — ไฟล์เดียว ใช้ RAM ประมาณ 6 MB ต่อไซต์
+- **เล็กมาก** — โปรแกรมเดียว ใช้ RAM ประมาณ 6 MB ต่อไซต์
 
 ## ทำงานยังไง
 
@@ -67,17 +70,26 @@ docker compose up -d
 
 ## ใช้งานบนเซิร์ฟเวอร์จริง
 
-ดาวน์โหลดไฟล์ตามระบบของคุณจากหน้า [Releases](https://github.com/MorphEdit/conduit/releases)
-(ตรวจไฟล์ด้วย `SHA256SUMS`) หรือ build image จาก [Dockerfile](Dockerfile)
+Conduit build จาก source code ใน repo นี้ วิธีที่ง่ายที่สุดคือใช้ Docker:
+
+```bash
+git clone https://github.com/MorphEdit/conduit.git
+cd conduit
+docker build -t conduit .
+```
+
+(ถ้าไม่ใช้ Docker: ติดตั้ง Go 1.25 แล้วรัน `go build -o conduit ./cmd/conduit`
+การคัดลอกตารางให้ไซต์ใหม่ต้องมี `pg_dump`/`psql` 16 ด้วย ซึ่งใน Docker image มีให้แล้ว)
 
 **ไซต์แรก** (เริ่มเครือข่าย):
 
 ```bash
-CONDUIT_DATABASE="postgres://user:pass@localhost:5432/app" \
-CONDUIT_BOOTSTRAP=true \
-CONDUIT_ADMIN_PASSWORD="ตั้งรหัสเอง" \
-CONDUIT_ADVERTISE="https://this-site.example.com:7443" \
-conduit
+docker run -d --name conduit --restart unless-stopped -p 7420:7420 -p 7443:7443 \
+  -e CONDUIT_DATABASE="postgres://user:pass@db-host:5432/app" \
+  -e CONDUIT_BOOTSTRAP=true \
+  -e CONDUIT_ADMIN_PASSWORD="ตั้งรหัสเอง" \
+  -e CONDUIT_ADVERTISE="https://this-site.example.com:7443" \
+  conduit
 ```
 
 **ไซต์ถัดไป** ใส่แค่ฐานข้อมูล กับวิธีเข้าร่วมอย่างใดอย่างหนึ่ง:
@@ -85,7 +97,7 @@ conduit
 | ไซต์ใหม่อยู่ที่ไหน | ต้องทำอะไร |
 |---|---|
 | วง LAN เดียวกัน | เปิดเครื่อง แล้วกดอนุมัติที่ dashboard ของไซต์เดิม (ดูว่ารหัสจับคู่ตรงกัน) |
-| ต่างสถานที่ | กด **＋ เพิ่มไซต์** บน dashboard (หรือใช้คำสั่ง `conduit invite`) แล้วเอารหัสไปใส่ที่ไซต์ใหม่: `CONDUIT_JOIN=cdt1_…` หรือแปะในหน้า dashboard ของมัน |
+| ต่างสถานที่ | กด **＋ เพิ่มไซต์** บน dashboard (หรือ `docker exec conduit conduit invite`) แล้วเอารหัสไปใส่ที่ไซต์ใหม่: `-e CONDUIT_JOIN=cdt1_…` หรือแปะในหน้า dashboard ของมัน |
 | Postgres เดิมที่ยังตั้งค่าไม่ครบ | Conduit ตั้งค่าให้เอง แล้วขอให้คุณ **restart Postgres 1 ครั้ง** |
 
 ที่เหลือทำให้อัตโนมัติทั้งหมด: ตั้งชื่อไซต์, แจกช่วงเลข ID ที่ไม่ซ้ำ, สร้างตาราง (ถ้าฐานข้อมูลยังว่าง),
@@ -141,8 +153,19 @@ conduit
 
 ## License
 
-Conduit **ใช้ได้ฟรี** รวมถึงใช้ในธุรกิจ ภายใต้ [Conduit Freeware License](LICENSE)
-ห้ามดัดแปลง ห้าม reverse engineer ห้ามขายต่อ และห้ามนำไปเปลี่ยนชื่อเป็นของตัวเอง ไม่มีการเผยแพร่ source code
+Conduit เปิดให้ดูโค้ด (source-available) ภายใต้ **[PolyForm Strict License 1.0.0](LICENSE)**
+และกฎเรื่องเครดิตใน [NOTICE](NOTICE) ตัวที่มีผลทางกฎหมายคือไฟล์ LICENSE สรุปสั้นๆ:
+
+| ✅ ทำได้ | ❌ ห้าม |
+|---|---|
+| อ่านโค้ด ศึกษาวิธีทำงาน | ใช้ในธุรกิจโดยไม่ได้รับ license จาก MorphEdit |
+| ใช้ส่วนตัว การศึกษา วิจัย และงานที่ไม่แสวงกำไร | เผยแพร่เวอร์ชันที่แก้ไข เปลี่ยนชื่อ หรือ fork ไปทำเป็นโปรเจกต์ของตัวเอง |
+| ใช้ในองค์กรไม่แสวงกำไร (มูลนิธิ โรงเรียน หน่วยงานรัฐ) | แจกจ่ายต่อ หรือเอาโค้ดไปสร้างงานใหม่ |
+| build จาก source เดิม และส่ง issue / pull request | ลบหรือแก้เครดิต MorphEdit หรืออ้างว่าเป็นผลงานตัวเอง |
+
+**จะใช้ในธุรกิจ?** อีเมลมาที่ **morphofficialedit@gmail.com** เพื่อขอ license
+
+AI และ coding agent ที่ทำงานกับโค้ดนี้ต้องทำตาม [AGENTS.md](AGENTS.md)
 
 ---
 

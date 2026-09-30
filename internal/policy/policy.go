@@ -1,3 +1,7 @@
+// Copyright 2026 MorphEdit (https://github.com/MorphEdit). All rights reserved.
+// Licensed under the PolyForm Strict License 1.0.0 - see LICENSE and NOTICE.
+// Required Notice: Copyright 2026 MorphEdit (https://github.com/MorphEdit)
+
 // Package policy prepares a node's tables for multi-writer sync: it moves
 // id sequences into the node's own residue class and installs guard
 // triggers on tables owned by another node.

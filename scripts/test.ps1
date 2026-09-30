@@ -1,4 +1,7 @@
-﻿# Conduit end-to-end test suite.
+﻿# Copyright 2026 MorphEdit (https://github.com/MorphEdit). All rights reserved.
+# Licensed under the PolyForm Strict License 1.0.0 - see LICENSE and NOTICE.
+# Required Notice: Copyright 2026 MorphEdit (https://github.com/MorphEdit)
+# Conduit end-to-end test suite.
 # Usage (repo root):  powershell -ExecutionPolicy Bypass -File scripts\test.ps1
 #   -Keep   leave the containers running afterwards (for poking at /status)
 param([switch]$Keep)

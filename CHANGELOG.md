@@ -10,4 +10,4 @@
   table-structure copy and initial snapshot, site removal
 - TLS 1.3 between sites with pinned certificates; per-site credentials revoked on removal
 - Live isometric dashboard
-- Binaries for Linux, Windows and macOS (amd64/arm64)
+- Source-available under the PolyForm Strict License 1.0.0; Docker image built from source

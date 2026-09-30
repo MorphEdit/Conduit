@@ -1,5 +1,8 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Commercial license / ใช้ในธุรกิจ
+    url: mailto:morphofficialedit@gmail.com
+    about: Using Conduit in a business needs a license from MorphEdit.
   - name: Security problem / ช่องโหว่ด้านความปลอดภัย
     url: https://github.com/MorphEdit/conduit/security/advisories/new
     about: Please report security problems privately.
