@@ -19,5 +19,5 @@ func String() string {
 	if Commit != "" {
 		s += " (" + Commit + ")"
 	}
-	return s + " — by " + Author + " · " + Homepage
+	return s + " - by " + Author + " | " + Homepage
 }
