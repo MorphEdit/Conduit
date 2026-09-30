@@ -36,31 +36,42 @@ type Status struct {
 	LastError string     `json:"last_error,omitempty"`
 }
 
+// Peer is a site this node ships its changes to.
+type Peer struct {
+	ID  string
+	URL string
+}
+
 type Sender struct {
-	peer   config.Peer
-	nodeID string
-	token  string
-	store  *store.Store
-	wake   <-chan struct{}
-	client *http.Client
-	log    *slog.Logger
+	peer      Peer
+	nodeID    string
+	token     string
+	retention time.Duration
+	store     *store.Store
+	wake      <-chan struct{}
+	client    *http.Client
+	log       *slog.Logger
 
 	mu sync.Mutex
 	st Status
 }
 
-func New(cfg *config.Config, peer config.Peer, st *store.Store, wake <-chan struct{}, log *slog.Logger) *Sender {
+func New(cfg *config.Config, peer Peer, st *store.Store, wake <-chan struct{}, log *slog.Logger) *Sender {
 	return &Sender{
-		peer:   peer,
-		nodeID: cfg.NodeID,
-		token:  cfg.Token,
-		store:  st,
-		wake:   wake,
-		client: &http.Client{Timeout: requestLimit},
-		log:    log.With("component", "sender", "peer", peer.ID),
-		st:     Status{ID: peer.ID, URL: peer.URL},
+		peer:      peer,
+		nodeID:    cfg.NodeID,
+		token:     cfg.Token,
+		retention: cfg.OutboxRetention,
+		store:     st,
+		wake:      wake,
+		client:    &http.Client{Timeout: requestLimit},
+		log:       log.With("component", "sender", "peer", peer.ID),
+		st:        Status{ID: peer.ID, URL: peer.URL},
 	}
 }
+
+// Wake returns the channel this sender listens on (for unsubscribing).
+func (s *Sender) Wake() <-chan struct{} { return s.wake }
 
 func (s *Sender) Status() Status {
 	s.mu.Lock()
@@ -107,7 +118,7 @@ func (s *Sender) Run(ctx context.Context) {
 			if err := s.store.SetCursor(ctx, s.peer.ID, cursor); err != nil {
 				s.log.Warn("save cursor", "err", err)
 			}
-			if err := s.store.Trim(ctx); err != nil {
+			if err := s.store.Trim(ctx, s.nodeID, s.retention); err != nil {
 				s.log.Warn("trim outbox", "err", err)
 			}
 			s.setAcked(cursor)

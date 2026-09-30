@@ -6,6 +6,8 @@ COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/conduit ./cmd/conduit
 
 FROM alpine:3.20
+# pg_dump/psql copy table definitions to a newly joining site.
+RUN apk add --no-cache postgresql16-client
 RUN adduser -D -u 10001 conduit
 COPY --from=build /out/conduit /usr/local/bin/conduit
 USER conduit

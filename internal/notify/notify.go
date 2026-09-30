@@ -17,6 +17,18 @@ func (b *Bus) Subscribe() <-chan struct{} {
 	return c
 }
 
+// Unsubscribe stops delivering to c.
+func (b *Bus) Unsubscribe(c <-chan struct{}) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for i, s := range b.subs {
+		if s == c {
+			b.subs = append(b.subs[:i], b.subs[i+1:]...)
+			return
+		}
+	}
+}
+
 // Publish wakes every subscriber without blocking.
 func (b *Bus) Publish() {
 	b.mu.Lock()

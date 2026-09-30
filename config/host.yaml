@@ -1,22 +1,4 @@
-node_id: host
-listen: ":7420"
-token: ${CONDUIT_TOKEN}
-database: postgres://postgres:conduit@pg-host:5432/app?sslmode=disable
-
-capture:
-  enabled: true
-  schemas: [public]
-
-# ids: host 1,11,21...  local 2,12,22...  branch 3,13,23...  (room for 10 sites)
-sequences:
-  offset: 1
-  step: 10
-
+# Optional. Everything else comes from CONDUIT_* env vars (see docker-compose.yml).
+# Table policies set here are shared with every site in the cluster.
 tables:
-  stock_lots: { owner: host }   # only host may write; others receive
-
-tombstone_ttl: 168h
-
-peers:
-  - { id: local, url: http://conduit-local:7420 }
-  - { id: branch, url: http://conduit-branch:7420 }
+  stock_lots: { owner: host }   # only host may write; other sites receive

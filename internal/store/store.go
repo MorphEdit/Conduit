@@ -61,6 +61,40 @@ var bootstrapSQL = []string{
 		detail      TEXT
 	)`,
 	`CREATE INDEX IF NOT EXISTS conflicts_detected_at ON conduit.conflicts (detected_at)`,
+	// This site's identity in the cluster (single row).
+	`CREATE TABLE IF NOT EXISTS conduit.node (
+		singleton  BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
+		id         TEXT        NOT NULL,
+		cluster_id TEXT        NOT NULL,
+		token      TEXT        NOT NULL,
+		id_offset  INT         NOT NULL,
+		id_step    INT         NOT NULL,
+		ready      BOOLEAN     NOT NULL DEFAULT false,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`,
+	// Every site this one knows about. Exchanged by gossip, newest row wins.
+	`CREATE TABLE IF NOT EXISTS conduit.members (
+		id         TEXT PRIMARY KEY,
+		url        TEXT        NOT NULL,
+		id_offset  INT         NOT NULL,
+		status     TEXT        NOT NULL DEFAULT 'active',
+		joined_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`,
+	// Cluster-wide settings (table owners, id step). Gossiped like members.
+	`CREATE TABLE IF NOT EXISTS conduit.settings (
+		key        TEXT PRIMARY KEY,
+		value      JSONB       NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`,
+	// One-time invite codes issued by this site (only hashes are stored).
+	`CREATE TABLE IF NOT EXISTS conduit.invites (
+		secret_hash TEXT PRIMARY KEY,
+		created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+		expires_at  TIMESTAMPTZ NOT NULL,
+		used_at     TIMESTAMPTZ,
+		used_by     TEXT
+	)`,
 	// Rejects writes to tables owned by another node. Apply sessions run with
 	// session_replication_role = replica, where this trigger does not fire.
 	`CREATE OR REPLACE FUNCTION conduit.owner_guard() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -72,8 +106,7 @@ var bootstrapSQL = []string{
 }
 
 type Store struct {
-	pool  *pgxpool.Pool
-	peers []string
+	pool *pgxpool.Pool
 }
 
 func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
@@ -81,13 +114,6 @@ func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 func (s *Store) Pool() *pgxpool.Pool { return s.pool }
 
 func (s *Store) Bootstrap(ctx context.Context) error {
-	var trackTs string
-	if err := s.pool.QueryRow(ctx, `SHOW track_commit_timestamp`).Scan(&trackTs); err != nil {
-		return err
-	}
-	if trackTs != "on" {
-		return fmt.Errorf("track_commit_timestamp is %q; set it to on and restart Postgres (needed for conflict resolution)", trackTs)
-	}
 	for _, q := range bootstrapSQL {
 		if _, err := s.pool.Exec(ctx, q); err != nil {
 			return err
@@ -96,17 +122,16 @@ func (s *Store) Bootstrap(ctx context.Context) error {
 	return nil
 }
 
-// EnsureCursors creates a cursor row for every peer so Trim never deletes
-// rows a peer has not seen yet.
-func (s *Store) EnsureCursors(ctx context.Context, peers []string) error {
-	s.peers = peers
-	for _, p := range peers {
-		if _, err := s.pool.Exec(ctx,
-			`INSERT INTO conduit.peer_cursor (peer_id) VALUES ($1) ON CONFLICT DO NOTHING`, p); err != nil {
-			return err
-		}
-	}
-	return nil
+// EnsureCursor creates the cursor row for a peer (idempotent).
+func (s *Store) EnsureCursor(ctx context.Context, peer string) error {
+	_, err := s.pool.Exec(ctx, `INSERT INTO conduit.peer_cursor (peer_id) VALUES ($1) ON CONFLICT DO NOTHING`, peer)
+	return err
+}
+
+// DeleteCursor forgets a removed peer so it no longer holds back Trim.
+func (s *Store) DeleteCursor(ctx context.Context, peer string) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM conduit.peer_cursor WHERE peer_id = $1`, peer)
+	return err
 }
 
 // AppendOutbox stores one committed transaction. The unique lsn makes a
@@ -197,20 +222,31 @@ func (s *Store) SetCursor(ctx context.Context, peer string, seq int64) error {
 	return err
 }
 
-// Trim deletes outbox rows every configured peer has acknowledged.
-func (s *Store) Trim(ctx context.Context) error {
-	if len(s.peers) == 0 {
-		return nil
-	}
-	_, err := s.pool.Exec(ctx,
-		`DELETE FROM conduit.outbox WHERE seq <= (
-			SELECT min(acked_seq) FROM conduit.peer_cursor WHERE peer_id = ANY($1))`, s.peers)
+// Trim deletes outbox rows that every active member has acknowledged and
+// that are older than retention. The retention window covers a site that is
+// joining right now: other sites may not have heard of it yet, but it will
+// still find everything after its snapshot here.
+func (s *Store) Trim(ctx context.Context, self string, retention time.Duration) error {
+	_, err := s.pool.Exec(ctx, `
+		DELETE FROM conduit.outbox
+		WHERE created_at < now() - make_interval(secs => $2)
+		  AND seq <= coalesce((
+			SELECT min(coalesce(c.acked_seq, 0))
+			FROM conduit.members m
+			LEFT JOIN conduit.peer_cursor c ON c.peer_id = m.id
+			WHERE m.status = 'active' AND m.id <> $1), 9223372036854775807)`,
+		self, retention.Seconds())
 	return err
 }
 
 type OutboxStats struct {
+	// Pending is how many transactions at least one peer still lacks
+	// (filled in by the server from the peer cursors).
 	Pending int64 `json:"pending"`
-	MaxSeq  int64 `json:"max_seq"`
+	// Retained is how many rows are kept, including delivered ones held
+	// for the retention window.
+	Retained int64 `json:"retained"`
+	MaxSeq   int64 `json:"max_seq"`
 }
 
 func (s *Store) OutboxStats(ctx context.Context) (OutboxStats, error) {
@@ -218,7 +254,7 @@ func (s *Store) OutboxStats(ctx context.Context) (OutboxStats, error) {
 	err := s.pool.QueryRow(ctx,
 		`SELECT count(*), (SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM conduit.outbox_seq_seq)
 		 FROM conduit.outbox`).
-		Scan(&st.Pending, &st.MaxSeq)
+		Scan(&st.Retained, &st.MaxSeq)
 	return st, err
 }
 

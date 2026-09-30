@@ -16,6 +16,7 @@ Conduit แค่คอยดูว่ามีอะไรเปลี่ยน
 | 4 | node ใหม่เข้าร่วมด้วย snapshot | ✅ |
 | 5 | ชุดทดสอบตัดเน็ตจริง 3 ไซต์ | ✅ |
 | + | Dashboard แบบ isometric | ✅ |
+| + | เพิ่ม/ถอดไซต์อัตโนมัติ (รหัสเชิญ, LAN + อนุมัติ, ตั้งค่า Postgres, คัดลอกตาราง) | ✅ |
 
 ## ภาพรวม
 
@@ -71,43 +72,66 @@ Conduit แค่คอยดูว่ามีอะไรเปลี่ยน
 **ตาราง owner-only:** เหมาะกับข้อมูลที่ห้ามแยกกันเขียน เช่น สต็อก บัญชี เงินเดือน ไซต์อื่นอ่านได้และได้รับข้อมูล แต่เขียนไม่ได้
 (ตอนเจ้าของล่ม ตารางนั้นจะเขียนไม่ได้ชั่วคราว เพื่อกันยอดเพี้ยน)
 
-## เพิ่มไซต์ใหม่ (snapshot)
+## เพิ่มไซต์ใหม่ (อัตโนมัติ)
+
+ไซต์ใหม่ใส่แค่ **ที่อยู่ฐานข้อมูล** ที่เหลือ Conduit ทำเองทั้งหมด
+
+| ขั้น | ทำเองไหม |
+|---|---|
+| ตั้งชื่อไซต์ (จากชื่อเครื่อง) | อัตโนมัติ |
+| ตั้งค่า Postgres (`wal_level`, `track_commit_timestamp`) | อัตโนมัติ + **restart Postgres 1 ครั้ง** ถ้าเป็นฐานข้อมูลเดิม |
+| หาไซต์อื่น | ในวง LAN: อัตโนมัติ · ต่างที่: แปะรหัสเชิญ |
+| ได้เลขชุด ID ที่ไม่ซ้ำ | อัตโนมัติ |
+| สร้างตาราง (ถ้าฐานข้อมูลว่าง) | อัตโนมัติ (`pg_dump --schema-only` จากไซต์เดิม) |
+| ดึงข้อมูลทั้งหมด | อัตโนมัติ (snapshot) |
+| ไซต์เดิมรู้จักไซต์ใหม่ | อัตโนมัติ (แลกรายชื่อกันทุก 10 วินาที ไม่ต้อง restart) |
+| กฎตาราง owner-only | อัตโนมัติ (แชร์ทั้งเครือข่าย) |
+
+### ไซต์แรก
 
 ```bash
-# 1. สร้าง schema ให้เหมือนไซต์อื่น แล้ว (ขณะที่ Conduit ของไซต์ใหม่ยังไม่รัน)
-conduit -config branch.yaml -snapshot-from host [-truncate]
-# 2. เพิ่ม branch เข้า peers ของไซต์อื่น แล้วเปิด Conduit ของ branch ตามปกติ
+CONDUIT_DATABASE=postgres://… CONDUIT_BOOTSTRAP=true CONDUIT_ADMIN_PASSWORD=… conduit
 ```
 
-snapshot เก็บเวลา commit เดิมของทุกแถวไว้ และตั้ง cursor ของทุกไซต์ให้ตรงกับข้อมูล
-change ที่เกิดระหว่างดึงจึงไม่หายและไม่เบิ้ล
+### ไซต์ถัดไป — ในวง LAN เดียวกัน
+
+1. เปิด Conduit ที่มีแค่ `CONDUIT_DATABASE` (และ `CONDUIT_ADMIN_PASSWORD`)
+2. หน้า dashboard ของไซต์ใหม่แสดง **รหัสจับคู่ 6 หลัก**
+3. ที่ dashboard ของไซต์เดิมจะขึ้น "ไซต์ใหม่ขอเข้าร่วม" — ดูว่ารหัสตรงกัน แล้วกด **อนุมัติ**
+
+### ไซต์ถัดไป — ต่างที่ (ข้ามอินเทอร์เน็ต)
+
+1. ที่ dashboard ไซต์เดิม กด **＋ เพิ่มไซต์** → ได้รหัสเชิญ `cdt1_…` (ใช้ได้ครั้งเดียว, 24 ชม.)
+   หรือใช้คำสั่ง `conduit invite`
+2. ที่ไซต์ใหม่: ตั้ง `CONDUIT_JOIN=<รหัส>` หรือแปะรหัสในหน้า dashboard ของมัน
+
+### ถอดไซต์ออก
+
+เลือกไซต์บน dashboard → **ถอดไซต์นี้ออก** ทุกไซต์จะหยุดส่งข้อมูลให้ และคิวจะไม่ค้างรอไซต์นั้นอีก
+(เลขชุด ID ของไซต์ที่ถอดออกจะไม่ถูกนำกลับมาใช้ เพราะแถวที่ไซต์นั้นเคยสร้างยังอยู่)
 
 ## Config
 
+ทุกค่าตั้งผ่าน env ได้ ไฟล์ YAML (`/etc/conduit/conduit.yaml`) ไม่จำเป็น
+
+| env | ค่าเริ่มต้น | ความหมาย |
+|---|---|---|
+| `CONDUIT_DATABASE` | — (ต้องใส่) | Postgres ของไซต์นี้ |
+| `CONDUIT_ADMIN_PASSWORD` | — | เปิดปุ่มบน dashboard (เชิญ / อนุมัติ / ถอด) |
+| `CONDUIT_BOOTSTRAP` | `false` | `true` = ไซต์นี้เริ่มเครือข่ายใหม่ |
+| `CONDUIT_JOIN` | — | รหัสเชิญ `cdt1_…` |
+| `CONDUIT_NODE_ID` | ชื่อเครื่อง | ชื่อไซต์ (a-z 0-9 _) |
+| `CONDUIT_ADVERTISE` | `http://<ชื่อเครื่อง>:7420` | ที่อยู่ที่ไซต์อื่นใช้ติดต่อ |
+| `CONDUIT_LISTEN` | `:7420` | พอร์ต HTTP (LAN discovery ใช้ UDP 7420) |
+| `CONDUIT_DISCOVERY` | `true` | ค้นหา/ประกาศตัวในวง LAN |
+
+ตัวอย่าง YAML (ตั้งที่ไซต์ไหนก็ได้ แล้วจะแชร์ทั้งเครือข่าย):
+
 ```yaml
-node_id: host                 # a-z 0-9 _ ; ห้ามเปลี่ยนภายหลัง
-listen: ":7420"
-token: ${CONDUIT_TOKEN}       # ทุกไซต์ใช้ token เดียวกัน
-database: postgres://user:pass@db:5432/app
-
-capture:
-  enabled: true
-  slot: conduit_slot          # ค่าเริ่มต้น
-  publication: conduit_pub    # ค่าเริ่มต้น
-  schemas: [public]           # ห้ามใส่ conduit
-
-sequences:                    # แนะนำ step 10 = รองรับได้ 10 ไซต์
-  offset: 1                   # host=1, local=2, branch=3 ...
-  step: 10
-
 tables:
-  stock_lots: { owner: host } # เขียนได้ที่ host เท่านั้น
-
-tombstone_ttl: 168h           # ต้องนานกว่าช่วงเน็ตหลุดที่นานที่สุด
-
-peers:
-  - { id: local,  url: http://conduit-local:7420 }
-  - { id: branch, url: http://conduit-branch:7420 }
+  stock_lots: { owner: host }   # เขียนได้ที่ host เท่านั้น
+tombstone_ttl: 168h              # ต้องนานกว่าช่วงเน็ตหลุดที่นานที่สุด
+outbox_retention: 1h             # เก็บ change ที่ส่งแล้วไว้ช่วงหนึ่ง เผื่อไซต์ที่กำลังเข้าร่วม
 ```
 
 ## Dashboard
@@ -130,15 +154,21 @@ peers:
 | `GET /health` | ใช้ตรวจว่ายังทำงานอยู่ |
 | `GET /v1/mesh` | สถานะของทุกไซต์รวมกัน (ใช้โดย dashboard) |
 | `GET /status` | capture, คิว, backlog ต่อ peer, ข้อมูลที่รับแล้ว, conflict ล่าสุด |
-| `POST /v1/apply` | peer ส่ง change มา (ต้องมี token) |
-| `GET /v1/snapshot` | ไซต์ใหม่ดึงข้อมูลทั้งหมด (ต้องมี token) |
+| `POST /v1/apply` | peer ส่ง change มา (cluster token) |
+| `GET /v1/snapshot` | ไซต์ใหม่ดึงข้อมูลทั้งหมด (cluster token) |
+| `GET /v1/members` | แลกรายชื่อสมาชิก (cluster token) |
+| `GET /v1/schema` | โครงสร้างตารางสำหรับไซต์ใหม่ (cluster token) |
+| `POST /v1/join` | ใช้รหัสเชิญเข้าร่วม |
+| `POST /v1/join-requests` | ไซต์ใน LAN ขอเข้าร่วม (รออนุมัติ) |
+| `POST /v1/admin/…` | สร้างรหัสเชิญ, อนุมัติ/ปฏิเสธ, ถอดไซต์, แปะรหัสเชิญ (รหัส admin) |
 
 ## ทดสอบ
 
 ต้องมีแค่ Docker ไม่ต้องลง Go
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\test.ps1          # ใส่ -Keep ถ้าอยากให้ container รันค้างไว้
+powershell -ExecutionPolicy Bypass -File scripts\up.ps1            # เปิด 3 ไซต์ + ข้อมูลตัวอย่าง + เปิด dashboard
+powershell -ExecutionPolicy Bypass -File scripts\test.ps1          # ชุดทดสอบ (ใส่ -Keep ถ้าอยากให้รันค้างไว้)
 ```
 
 test bench มี 3 ไซต์ แต่ละไซต์มี network ของตัวเอง มีแค่ Conduit ที่ต่อ network `conduit_wan`
@@ -146,6 +176,7 @@ test bench มี 3 ไซต์ แต่ละไซต์มี network ข�
 
 | # | ทดสอบ |
 |---|---|
+| 0 | host เริ่มเครือข่าย · local เข้าร่วมด้วยรหัสเชิญ (ฐานข้อมูลว่าง → คัดลอกตาราง) · รหัสใช้ซ้ำไม่ได้ |
 | 1 | host → local ครบทุกชนิดข้อมูล (ไทย, array, jsonb, bytea, numeric, date, composite key, identity) |
 | 2 | local → host และเลข ID แยกตามไซต์ |
 | 3 | ไม่มีการส่งวนกลับ |
@@ -155,14 +186,16 @@ test bench มี 3 ไซต์ แต่ละไซต์มี network ข�
 | 7 | ตาราง owner-only |
 | 8 | unique conflict → คิวไม่ค้าง + แก้เองแล้วกลับมาตรงกัน |
 | 9 | ปิด Conduit / Postgres แต่ละฝั่ง |
-| 10 | ไซต์ที่ 3 เข้าร่วมด้วย snapshot → ซิงก์สามทาง, ไม่มี conflict ปลอม |
+| 10 | branch ไม่ได้ตั้งค่าอะไร + Postgres ยังไม่พร้อม → ตั้งค่าเอง → หา host ใน LAN → อนุมัติ → ซิงก์สามทาง |
 | 11 | ส่ง seq เก่าซ้ำ, token ผิด |
-| 12 | dashboard และ `/v1/mesh` (รวมถึงตอนมีไซต์ขาด) |
+| 12 | dashboard และ `/v1/mesh` |
+| 13 | ถอดไซต์ออก |
 
 ## ข้อกำหนดของ Postgres
 
 - Postgres 16+ พร้อม `wal_level=logical` และ `track_commit_timestamp=on` (ต้อง restart)
-- user ของ Conduit ต้องเป็น superuser (publication, slot, replication origin, `session_replication_role`)
+- user ของ Conduit ต้องเป็น superuser (publication, slot, replication origin, `session_replication_role`, `ALTER SYSTEM`)
+- Conduit ใช้ `pg_dump`/`psql` เวอร์ชัน 16 คัดลอกตาราง ถ้า Postgres เป็นเวอร์ชันอื่น ให้สร้างตารางเองก่อนเข้าร่วม
 - ทุกตารางต้องมี primary key
 - schema ต้องเหมือนกันทุกไซต์ Conduit ไม่ซิงก์ DDL และไม่ซิงก์ `TRUNCATE` ให้แก้ schema ทุกไซต์เอง
   แล้ว restart Conduit (sequence ของตารางใหม่จะถูกจัดให้ตอนเริ่ม)
@@ -174,14 +207,17 @@ test bench มี 3 ไซต์ แต่ละไซต์มี network ข�
   หรือตั้งเป็น owner-only
 - last-write-wins ทั้งแถว: ถ้า A แก้คอลัมน์ 1 และ B แก้คอลัมน์ 2 ของแถวเดียวกันพร้อมกัน จะเหลือแค่ของอันหลัง
 - ถ้าเวลา commit ตรงกันถึงระดับไมโครวินาที ผลอาจไม่แน่นอน (เกิดได้ยากมาก)
-- peer ที่ปิดถาวรทำให้ outbox ไม่ถูกลบ ต้องเอาออกจาก `peers` ของทุกไซต์
+- ไซต์ที่ปิดถาวรทำให้ outbox ไม่ถูกลบ — กดถอดออกบน dashboard
+- ทุกไซต์ใช้ cluster token ร่วมกัน การถอดไซต์หยุดการซิงก์ แต่ยังไม่ได้เปลี่ยน token ถ้าเครื่องที่ถอดออกไม่น่าไว้ใจ ให้ตั้งเครือข่ายใหม่
+- LAN discovery ใช้ UDP broadcast เจอเฉพาะเครื่องในวงเดียวกัน (ข้าม router ไม่ได้ ใช้รหัสเชิญแทน)
+- ถ้าสองไซต์ใหม่เข้าร่วมพร้อมกันผ่านคนละไซต์ อาจได้เลขชุด ID เดียวกัน dashboard จะเตือน ให้ถอดไซต์หนึ่งแล้วเชิญใหม่
 - transaction ใหญ่มากจะถูกเก็บในหน่วยความจำก่อนเขียน outbox
 - ส่งผ่าน HTTP ธรรมดา ใช้ข้ามอินเทอร์เน็ตจริงต้องมี TLS (reverse proxy) หรือ VPN
 
 ## โครงสร้าง
 
 ```
-cmd/conduit/         main + โหมด -snapshot-from
+cmd/conduit/         main + คำสั่ง `conduit invite`
 internal/config/     โหลด YAML (+ ${ENV})
 internal/capture/    อ่าน WAL → outbox (+ tombstone ของการลบ)
 internal/store/      ตาราง conduit.* (outbox, cursor, inbox, tombstones, conflicts)
@@ -189,6 +225,8 @@ internal/sender/     ส่ง outbox ไปหา peer แต่ละตัว
 internal/apply/      เขียน change ของ peer + last-write-wins
 internal/policy/     จัด sequence ตามไซต์, trigger owner-only
 internal/snapshot/   ส่ง/รับ snapshot
+internal/cluster/    สมาชิก, gossip, รหัสเชิญ, LAN discovery, คำขอเข้าร่วม
+internal/node/       ขั้นตอนเริ่มระบบ: รอ DB → ตั้งค่า Postgres → เข้าร่วม → ซิงก์
 internal/server/     HTTP + dashboard (ui/ ฝังในไฟล์ binary)
 scripts/test.ps1     ชุดทดสอบ end-to-end
 ```

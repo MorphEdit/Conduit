@@ -49,9 +49,6 @@ type line struct {
 // Cursors for other origins are read INSIDE the snapshot, so they match the
 // data exactly.
 func Serve(ctx context.Context, w http.ResponseWriter, pool *pgxpool.Pool, cfg *config.Config) error {
-	if !cfg.Capture.Enabled {
-		return errors.New("this node has capture disabled and cannot serve snapshots")
-	}
 	var seq int64
 	if err := pool.QueryRow(ctx,
 		`SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM conduit.outbox_seq_seq`).Scan(&seq); err != nil {
@@ -176,24 +173,14 @@ func dumpTable(ctx context.Context, tx pgx.Tx, enc *json.Encoder, qualified stri
 	return n, rows.Err()
 }
 
-// Pull loads a snapshot from peer into the local database. The local node's
-// own Conduit service should be stopped while this runs.
-func Pull(ctx context.Context, cfg *config.Config, peerID string, truncate bool, ap *apply.Applier, log *slog.Logger) error {
-	var peer *config.Peer
-	for i := range cfg.Peers {
-		if cfg.Peers[i].ID == peerID {
-			peer = &cfg.Peers[i]
-		}
-	}
-	if peer == nil {
-		return fmt.Errorf("peer %q is not in the config", peerID)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(peer.URL, "/")+"/v1/snapshot", nil)
+// Pull loads a snapshot from the peer at peerURL into the local database.
+// Nothing else may be applying to this database while it runs.
+func Pull(ctx context.Context, cfg *config.Config, peerID, peerURL, token string, truncate bool, ap *apply.Applier, log *slog.Logger) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(peerURL, "/")+"/v1/snapshot", nil)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+cfg.Token)
+	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err

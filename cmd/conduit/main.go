@@ -1,35 +1,31 @@
 // Command conduit keeps Postgres databases on several sites in sync.
+//
+//	conduit              run the site (dashboard on :7420)
+//	conduit invite       print a one-time invite code for a new site
 package main
 
 import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/conduit-sync/conduit/internal/apply"
-	"github.com/conduit-sync/conduit/internal/capture"
+	"github.com/conduit-sync/conduit/internal/cluster"
 	"github.com/conduit-sync/conduit/internal/config"
-	"github.com/conduit-sync/conduit/internal/notify"
-	"github.com/conduit-sync/conduit/internal/policy"
-	"github.com/conduit-sync/conduit/internal/sender"
+	"github.com/conduit-sync/conduit/internal/node"
 	"github.com/conduit-sync/conduit/internal/server"
-	"github.com/conduit-sync/conduit/internal/snapshot"
-	"github.com/conduit-sync/conduit/internal/store"
 )
 
 func main() {
-	cfgPath := flag.String("config", "conduit.yaml", "path to config file")
-	snapshotFrom := flag.String("snapshot-from", "", "copy all tables from this peer, then exit (stop the service first)")
-	truncate := flag.Bool("truncate", false, "with -snapshot-from: empty local tables before loading")
+	cfgPath := flag.String("config", "/etc/conduit/conduit.yaml", "optional config file (CONDUIT_* env vars override it)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stdout, nil))
@@ -38,14 +34,16 @@ func main() {
 		log.Error("invalid config", "err", err)
 		os.Exit(1)
 	}
-	log = log.With("node", cfg.NodeID)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if *snapshotFrom != "" {
-		err = runSnapshot(ctx, cfg, *snapshotFrom, *truncate, log)
-	} else {
-		err = run(ctx, cfg, log)
+	switch flag.Arg(0) {
+	case "":
+		err = run(ctx, cfg, log.With("node", cfg.NodeID))
+	case "invite":
+		err = invite(ctx, cfg)
+	default:
+		err = fmt.Errorf("unknown command %q (commands: invite)", flag.Arg(0))
 	}
 	if err != nil && !errors.Is(err, context.Canceled) {
 		log.Error("fatal", "err", err)
@@ -53,115 +51,46 @@ func main() {
 	}
 }
 
-// open connects and bootstraps Conduit's schema, waiting for the database.
-func open(ctx context.Context, cfg *config.Config, log *slog.Logger) (*store.Store, error) {
-	pool, err := pgxpool.New(ctx, cfg.Database)
-	if err != nil {
-		return nil, err
-	}
-	st := store.New(pool)
-	for attempt := 1; ; attempt++ {
-		if err = st.Bootstrap(ctx); err == nil {
-			return st, nil
-		}
-		log.Warn("database not ready", "err", err, "attempt", attempt)
-		select {
-		case <-ctx.Done():
-			pool.Close()
-			return nil, ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
-	}
-}
-
-func runSnapshot(ctx context.Context, cfg *config.Config, peer string, truncate bool, log *slog.Logger) error {
-	st, err := open(ctx, cfg, log)
-	if err != nil {
-		return err
-	}
-	defer st.Pool().Close()
-	ap := apply.New(cfg, log)
-	defer ap.Close()
-	if err := snapshot.Pull(ctx, cfg, peer, truncate, ap, log); err != nil {
-		return err
-	}
-	return policy.Setup(ctx, st.Pool(), cfg, log)
-}
-
 func run(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
+	rt := node.New(cfg, log)
+	httpSrv := &http.Server{Addr: cfg.Listen, Handler: server.New(rt).Handler(), ReadHeaderTimeout: 10 * time.Second}
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- httpSrv.ListenAndServe() }()
+	log.Info("conduit started", "listen", cfg.Listen, "advertise", cfg.Advertise)
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- rt.Run(ctx) }()
 
-	st, err := open(ctx, cfg, log)
+	select {
+	case err := <-serveErr:
+		cancel()
+		<-runErr
+		return err
+	case err := <-runErr:
+		shutdown, c := context.WithTimeout(context.Background(), 5*time.Second)
+		defer c()
+		httpSrv.Shutdown(shutdown)
+		return err
+	}
+}
+
+func invite(ctx context.Context, cfg *config.Config) error {
+	pool, err := pgxpool.New(ctx, cfg.Database)
 	if err != nil {
 		return err
 	}
-	defer st.Pool().Close()
-	if err := st.EnsureCursors(ctx, cfg.PeerIDs()); err != nil {
+	defer pool.Close()
+	id, err := cluster.LoadIdentity(ctx, pool)
+	if err != nil || id == nil || !id.Ready {
+		return errors.New("this site has not joined a cluster yet")
+	}
+	code, exp, err := cluster.CreateInvite(ctx, pool, cfg.Advertise, 24*time.Hour)
+	if err != nil {
 		return err
 	}
-	if err := policy.Setup(ctx, st.Pool(), cfg, log); err != nil {
-		return err
-	}
-
-	var (
-		wg   sync.WaitGroup
-		bus  notify.Bus
-		capt *capture.Capture
-	)
-	if cfg.Capture.Enabled {
-		capt = capture.New(cfg, st, &bus, log)
-		if err := capt.Setup(ctx); err != nil {
-			return err
-		}
-		wg.Add(1)
-		go func() { defer wg.Done(); capt.Run(ctx) }()
-	}
-
-	senders := make([]*sender.Sender, len(cfg.Peers))
-	for i, p := range cfg.Peers {
-		s := sender.New(cfg, p, st, bus.Subscribe(), log)
-		senders[i] = s
-		wg.Add(1)
-		go func() { defer wg.Done(); s.Run(ctx) }()
-	}
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for {
-			if err := st.Janitor(ctx, cfg.TombstoneTTL); err != nil && ctx.Err() == nil {
-				log.Warn("janitor", "err", err)
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(time.Hour):
-			}
-		}
-	}()
-
-	applier := apply.New(cfg, log)
-	defer applier.Close()
-
-	httpSrv := &http.Server{
-		Addr:              cfg.Listen,
-		Handler:           server.New(cfg, st, capt, senders, applier, log).Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-	go func() {
-		<-ctx.Done()
-		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		httpSrv.Shutdown(shutdown)
-	}()
-
-	log.Info("conduit started", "listen", cfg.Listen, "capture", cfg.Capture.Enabled, "peers", cfg.PeerIDs())
-	err = httpSrv.ListenAndServe()
-	if errors.Is(err, http.ErrServerClosed) {
-		err = nil
-	}
-	cancel()
-	wg.Wait()
-	return err
+	fmt.Println(code)
+	fmt.Fprintf(os.Stderr, "valid until %s, single use. On the new site set CONDUIT_JOIN=<code> or paste it on its dashboard.\n", exp.Format(time.RFC1123))
+	return nil
 }

@@ -86,10 +86,13 @@
       links.push({ a: a.id, b: b.id, ab, ba, state: worst });
     }
     nodes.forEach(n => {
+      n.phase = n.st.phase || 'running';
       const mine = links.filter(l => l.a === n.id || l.b === n.id).map(l => l.state);
-      n.state = !n.up ? 'down' : mine.includes('down') || mine.includes('warn') ? 'warn' : mine.includes('busy') || (n.st.outbox && n.st.outbox.pending > 0) ? 'busy' : 'ok';
+      n.state = !n.up ? 'down' : n.phase !== 'running' ? 'warn' : mine.includes('down') || mine.includes('warn') ? 'warn' : mine.includes('busy') || (n.st.outbox && n.st.outbox.pending > 0) ? 'busy' : 'ok';
     });
-    return { self: m.self, nodes, byId, links };
+    const requests = [];
+    nodes.forEach(n => (n.up && n.st.join_requests || []).forEach(r => requests.push({ ...r, holder: n.id })));
+    return { self: m.self, nodes, byId, links, requests };
   }
 
   // ---------- one-time scene build (per topology) ----------
@@ -167,6 +170,7 @@
   };
   const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
   const stateText = { ok: 'ซิงก์แล้ว', busy: 'มีคิวรอส่ง', warn: 'กำลัง retry', down: 'ออฟไลน์' };
+  const phaseText = { starting: 'กำลังเริ่ม', waiting_db: 'รอฐานข้อมูล', needs_restart: 'รอ restart Postgres', waiting_to_join: 'รอเข้าร่วม', joining: 'กำลังเข้าร่วม' };
 
   function render() {
     if (!mesh) return;
@@ -184,10 +188,12 @@
       const cap = document.querySelector(`[data-cap="${n.id}"]`);
       cap.classList.toggle('off', !(n.up && n.st.capture && n.st.capture.connected));
       const sub = document.querySelector(`[data-sub="${n.id}"]`);
-      sub.textContent = !n.up ? 'ติดต่อไม่ได้' : (n.offset ? `ID ลงท้าย ${n.offset % n.step}` : '') + ` · คิว ${n.st.outbox ? n.st.outbox.pending : 0}`;
+      sub.textContent = !n.up ? 'ติดต่อไม่ได้' : n.phase !== 'running' ? phaseText[n.phase] || n.phase :
+        (n.offset ? `ID ลงท้าย ${n.offset % n.step}` : '') + ` · คิว ${n.st.outbox ? n.st.outbox.pending : 0}`;
       sub.classList.toggle('down', !n.up);
       const card = document.querySelector(`[data-card="${n.id}"]`);
-      card.textContent = !n.up ? 'ติดต่อไม่ได้' : `${stateText[n.state]} · conflict ${n.st.conflicts ? n.st.conflicts.total : 0}`;
+      card.textContent = !n.up ? 'ติดต่อไม่ได้' : n.phase !== 'running' ? phaseText[n.phase] || n.phase :
+        `${stateText[n.state]} · conflict ${n.st.conflicts ? n.st.conflicts.total : 0}`;
       const btn = card.closest('.site-card');
       btn.classList.toggle('selected', n.id === selected);
       btn.classList.toggle('down', !n.up);
@@ -246,10 +252,96 @@
     $('updated').textContent = (demo ? 'ข้อมูลตัวอย่าง · ' : 'ข้อมูลจริง · ') + 'อัปเดต ' + new Date().toLocaleTimeString('th-TH');
     $('self-node').textContent = '/ ' + m.self;
 
+    renderCluster(m);
     document.querySelector('.pause-symbol').textContent = paused ? '▷' : 'Ⅱ';
     $('motion-label').textContent = paused ? 'เล่นการเคลื่อนไหว' : 'หยุดการเคลื่อนไหว';
     $('motion').setAttribute('aria-pressed', String(paused));
   }
+
+  // ---------- cluster controls ----------
+  let adminPw = null;
+  async function adminFetch(path, body) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (!adminPw) {
+        adminPw = window.prompt('รหัส admin ของไซต์นี้ (CONDUIT_ADMIN_PASSWORD)');
+        if (!adminPw) throw new Error('ยกเลิก');
+      }
+      const r = await fetch(path, { method: 'POST', headers: { 'X-Admin-Password': adminPw, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+      if (r.status === 401) { adminPw = null; continue; }
+      if (!r.ok) throw new Error((await r.text()).trim() || r.statusText);
+      return r.status === 204 ? null : r.json();
+    }
+    throw new Error('รหัส admin ไม่ถูกต้อง');
+  }
+
+  function renderCluster(m) {
+    const self = m.byId[m.self], st = self ? self.st : {};
+    const running = !st.phase || st.phase === 'running';
+    const banner = $('banner');
+    const msg = st.removed ? 'ไซต์นี้ถูกถอดออกจากเครือข่ายแล้ว — หยุดซิงก์' : st.warning || st.notice || (!running && st.error) || '';
+    banner.hidden = !msg || demo || st.phase === 'joining';
+    banner.textContent = msg;
+    banner.className = 'banner' + (!st.notice && !st.warning && st.error ? ' error' : '');
+
+    const joining = st.phase === 'waiting_to_join' || st.phase === 'joining';
+    $('join-panel').hidden = !joining;
+    if (joining) {
+      const p = st.pairing || {};
+      $('pair-code').textContent = p.code || '— — —';
+      $('join-title').textContent = st.phase === 'joining' ? (st.notice || 'กำลังเข้าร่วม…') :
+        p.status === 'requested' ? `ส่งคำขอไปที่ ${String(p.seed_id || '').toUpperCase()} แล้ว — รออนุมัติ` :
+        p.status === 'rejected' ? 'คำขอถูกปฏิเสธ — จะลองใหม่ใน 5 นาที' : 'กำลังค้นหาไซต์อื่นในวง LAN…';
+      $('paste-form').hidden = st.phase === 'joining';
+    }
+
+    $('add-site').hidden = !running || demo || !st.admin_enabled;
+    const reqs = m.requests || [];
+    $('requests').hidden = reqs.length === 0;
+    $('request-rows').innerHTML = reqs.map(r => `<li>
+      <span class="rq-name">${esc(r.node_id)}</span><span class="rq-code">${esc(r.code)}</span>
+      <span class="rq-meta">${esc(r.url)} · ${rel(r.created_at)}</span>
+      <span class="rq-actions">${r.holder === m.self
+        ? `<button type="button" data-approve="${esc(r.id)}">อนุมัติ</button><button type="button" class="reject" data-reject="${esc(r.id)}">ปฏิเสธ</button>`
+        : `<span class="rq-meta">อนุมัติที่ dashboard ของ ${esc(r.holder).toUpperCase()}</span>`}</span></li>`).join('');
+
+    const sel = m.byId[selected];
+    $('remove-site').hidden = demo || !running || !st.admin_enabled || !sel || sel.id === m.self;
+  }
+
+  document.addEventListener('click', async e => {
+    const a = e.target.closest('[data-approve],[data-reject]');
+    if (!a) return;
+    const id = a.dataset.approve || a.dataset.reject;
+    if (a.dataset.approve && !confirm('รหัสจับคู่ตรงกับที่หน้าจอไซต์ใหม่แสดงใช่ไหม?')) return;
+    try { await adminFetch(`v1/admin/requests/${id}/${a.dataset.approve ? 'approve' : 'reject'}`); tick(); }
+    catch (err) { alert(err.message); }
+  });
+  $('add-site').addEventListener('click', async () => {
+    try {
+      const r = await adminFetch('v1/admin/invites');
+      $('invite-code').textContent = r.code;
+      $('invite-exp').textContent = new Date(r.expires_at).toLocaleString('th-TH');
+      $('invite-box').hidden = false;
+    } catch (err) { alert(err.message); }
+  });
+  $('copy-invite').addEventListener('click', () => {
+    navigator.clipboard.writeText($('invite-code').textContent).then(() => {
+      $('copy-invite').textContent = 'คัดลอกแล้ว';
+      setTimeout(() => { $('copy-invite').textContent = 'คัดลอก'; }, 1500);
+    });
+  });
+  $('remove-site').addEventListener('click', async () => {
+    if (!confirm(`ถอด ${selected.toUpperCase()} ออกจากเครือข่าย? ไซต์อื่นจะหยุดส่งข้อมูลให้ไซต์นี้`)) return;
+    try { await adminFetch(`v1/admin/members/${selected}/remove`); tick(); } catch (err) { alert(err.message); }
+  });
+  $('paste-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const code = $('paste-input').value.trim(), msg = $('paste-msg');
+    if (!code.startsWith('cdt1_')) { msg.textContent = 'รหัสเชิญต้องขึ้นต้นด้วย cdt1_'; msg.className = 'form-msg err'; return; }
+    try { await adminFetch('v1/admin/join', { invite: code }); msg.textContent = 'กำลังเข้าร่วม…'; msg.className = 'form-msg'; }
+    catch (err) { msg.textContent = err.message; msg.className = 'form-msg err'; }
+  });
+  $('paste-input').addEventListener('input', () => { $('paste-msg').textContent = ''; });
 
   function setMode(text, cls) { const el = $('mode'); el.textContent = text; el.className = 'mode ' + (cls || ''); }
 

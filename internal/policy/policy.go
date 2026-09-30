@@ -125,7 +125,7 @@ func installGuards(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config, 
 	}
 
 	want := map[string]string{}
-	for name, p := range cfg.Tables {
+	for name, p := range cfg.TablesCopy() {
 		if p.Owner != "" && p.Owner != cfg.NodeID {
 			want[name] = p.Owner
 		}

@@ -2,65 +2,76 @@
 # Postgres and a Conduit; only the Conduits share the "wan" network, so
 # `docker network disconnect conduit_wan <container>` simulates a site
 # losing its internet link while its local database keeps working.
-x-postgres: &postgres
-  image: postgres:16-alpine
-  command: >
-    postgres
-    -c wal_level=logical
-    -c track_commit_timestamp=on
-    -c max_replication_slots=10
-    -c max_wal_senders=10
-  environment:
-    POSTGRES_USER: postgres
-    POSTGRES_PASSWORD: conduit
-    POSTGRES_DB: app
-    TZ: Asia/Bangkok
-  volumes:
-    - ./testdata/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
-  healthcheck:
-    test: ["CMD-SHELL", "pg_isready -U postgres -d app"]
-    interval: 2s
-    timeout: 3s
-    retries: 30
+#
+#   host   founds the cluster
+#   local  joins with an invite code (LOCAL_INVITE), empty database
+#   branch has nothing configured: found on the LAN, approved on a dashboard;
+#          its Postgres starts WITHOUT the settings Conduit needs
+x-pg-env: &pg-env
+  POSTGRES_USER: postgres
+  POSTGRES_PASSWORD: conduit
+  POSTGRES_DB: app
+  TZ: Asia/Bangkok
+
+x-pg-health: &pg-health
+  test: ["CMD-SHELL", "pg_isready -U postgres -d app"]
+  interval: 2s
+  timeout: 3s
+  retries: 30
 
 x-conduit: &conduit
   build: .
   image: conduit:dev
-  environment:
-    CONDUIT_TOKEN: ${CONDUIT_TOKEN:-dev-secret-change-me}
   restart: unless-stopped
   mem_limit: 64m
 
 services:
   pg-host:
-    <<: *postgres
+    image: postgres:16-alpine
+    command: postgres -c wal_level=logical -c track_commit_timestamp=on
+    environment: *pg-env
+    volumes: ["./testdata/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro"]
+    healthcheck: *pg-health
     networks: [site_host]
     ports: ["127.0.0.1:55432:5432"]
 
   conduit-host:
     <<: *conduit
+    environment:
+      CONDUIT_NODE_ID: host
+      CONDUIT_BOOTSTRAP: "true"
+      CONDUIT_DATABASE: postgres://postgres:conduit@pg-host:5432/app?sslmode=disable
+      CONDUIT_ADVERTISE: http://conduit-host:7420
+      CONDUIT_ADMIN_PASSWORD: ${CONDUIT_ADMIN_PASSWORD:-admin}
     volumes: ["./config/host.yaml:/etc/conduit/conduit.yaml:ro"]
     networks: [site_host, wan]
     ports: ["127.0.0.1:7420:7420"]
-    depends_on:
-      pg-host: { condition: service_healthy }
+    depends_on: { pg-host: { condition: service_healthy } }
 
   pg-local:
-    <<: *postgres
+    image: postgres:16-alpine
+    command: postgres -c wal_level=logical -c track_commit_timestamp=on
+    environment: *pg-env
+    healthcheck: *pg-health
     networks: [site_local]
     ports: ["127.0.0.1:55433:5432"]
 
   conduit-local:
     <<: *conduit
-    volumes: ["./config/local.yaml:/etc/conduit/conduit.yaml:ro"]
+    environment:
+      CONDUIT_NODE_ID: local
+      CONDUIT_JOIN: ${LOCAL_INVITE:-}
+      CONDUIT_DATABASE: postgres://postgres:conduit@pg-local:5432/app?sslmode=disable
+      CONDUIT_ADVERTISE: http://conduit-local:7420
+      CONDUIT_ADMIN_PASSWORD: ${CONDUIT_ADMIN_PASSWORD:-admin}
     networks: [site_local, wan]
     ports: ["127.0.0.1:7421:7420"]
-    depends_on:
-      pg-local: { condition: service_healthy }
+    depends_on: { pg-local: { condition: service_healthy } }
 
-  # Third site, started later by the tests to exercise snapshot join.
   pg-branch:
-    <<: *postgres
+    image: postgres:16-alpine
+    environment: *pg-env
+    healthcheck: *pg-health
     profiles: [branch]
     networks: [site_branch]
     ports: ["127.0.0.1:55434:5432"]
@@ -68,11 +79,14 @@ services:
   conduit-branch:
     <<: *conduit
     profiles: [branch]
-    volumes: ["./config/branch.yaml:/etc/conduit/conduit.yaml:ro"]
+    environment:
+      CONDUIT_NODE_ID: branch
+      CONDUIT_DATABASE: postgres://postgres:conduit@pg-branch:5432/app?sslmode=disable
+      CONDUIT_ADVERTISE: http://conduit-branch:7420
+      CONDUIT_ADMIN_PASSWORD: ${CONDUIT_ADMIN_PASSWORD:-admin}
     networks: [site_branch, wan]
     ports: ["127.0.0.1:7422:7420"]
-    depends_on:
-      pg-branch: { condition: service_healthy }
+    depends_on: { pg-branch: { condition: service_healthy } }
 
 networks:
   site_host:

@@ -1,4 +1,4 @@
-﻿# Conduit end-to-end test suite (phase 5).
+﻿# Conduit end-to-end test suite.
 # Usage (repo root):  powershell -ExecutionPolicy Bypass -File scripts\test.ps1
 #   -Keep   leave the containers running afterwards (for poking at /status)
 param([switch]$Keep)
@@ -12,7 +12,7 @@ $OutputEncoding = [Text.UTF8Encoding]::new($false)
 
 $tables = @('customers', 'quotations', 'quotation_items', 'stock_lots')
 $ports = @{ host = 7420; local = 7421; branch = 7422 }
-$token = if ($env:CONDUIT_TOKEN) { $env:CONDUIT_TOKEN } else { 'dev-secret-change-me' }
+$adminPw = if ($env:CONDUIT_ADMIN_PASSWORD) { $env:CONDUIT_ADMIN_PASSWORD } else { 'admin' }
 $script:nodes = @('host', 'local')
 $script:passed = 0
 $script:failed = 0
@@ -72,12 +72,51 @@ function ConflictCount([string]$node, [string]$kind) {
     [int](Sql $node "SELECT count(*) FROM conduit.conflicts WHERE kind = '$kind'")
 }
 
+function WaitPhase([string]$node, [string]$phase, [int]$timeoutSec = 120) {
+    $deadline = (Get-Date).AddSeconds($timeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        try { $s = Status $node; if ($s.phase -eq $phase) { return $s } } catch { }
+        Start-Sleep 1
+    }
+    return $null
+}
+
+# POST an admin action; returns the HTTP status code.
+function Admin([string]$node, [string]$path, [string]$password = $adminPw, $body = $null) {
+    $h = @{ 'X-Admin-Password' = $password }
+    try {
+        $req = @{ Uri = "http://127.0.0.1:$($ports[$node])$path"; Method = 'Post'; Headers = $h; UseBasicParsing = $true }
+        if ($body) { $req.Body = ($body | ConvertTo-Json); $req.ContentType = 'application/json' }
+        $r = Invoke-WebRequest @req
+        $script:lastBody = $r.Content
+        return [int]$r.StatusCode
+    } catch { return [int]$_.Exception.Response.StatusCode }
+}
+
 # ---------------------------------------------------------------------------
-Section "starting test bench (fresh)"
+Section "0. zero-config setup: found the cluster, join with an invite"
 docker compose --profile branch down -v --remove-orphans 2>&1 | Out-Null
-Compose up -d --build pg-host pg-local conduit-host conduit-local 2>&1 | Out-Null
-WaitHealthy host; WaitHealthy local
-Write-Host "  host + local up; branch will join later"
+$env:LOCAL_INVITE = ''
+Compose up -d --build pg-host conduit-host 2>&1 | Out-Null
+$hs = WaitPhase host 'running'
+Check ($null -ne $hs -and $hs.sequences.offset -eq 1) 'host founded a new cluster (id slot 1)'
+Check ((Admin host '/v1/admin/invites' 'wrong') -eq 401) 'invite needs the admin password'
+Check ((Admin host '/v1/admin/invites') -eq 200) 'admin created an invite code'
+$invite = ($script:lastBody | ConvertFrom-Json).code
+$env:LOCAL_INVITE = $invite
+Compose up -d pg-local conduit-local 2>&1 | Out-Null
+$ls = WaitPhase local 'running'
+Check ($null -ne $ls -and $ls.sequences.offset -eq 2) 'local joined with the invite (id slot 2)'
+Check ((Sql local "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'") -eq '4') 'empty local database got the table structure copied'
+Check ((Sql local "SELECT count(*) FROM pg_trigger WHERE tgname = 'conduit_owner_guard'") -eq '1') 'local adopted the shared owner-only rule for stock_lots'
+Start-Sleep 12
+$hostPeers = @((Status host).peers | ForEach-Object id)
+Check ($hostPeers -contains 'local') 'host started syncing to local by itself (no config edit, no restart)'
+$inv = $invite.Substring(5).Replace('-', '+').Replace('_', '/'); while ($inv.Length % 4) { $inv += '=' }
+$secret = ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($inv)) | ConvertFrom-Json).s
+$code = try { Invoke-WebRequest "http://127.0.0.1:7420/v1/join" -Method Post -ContentType 'application/json' -UseBasicParsing `
+    -Body (@{ secret = $secret; id = 'intruder'; url = 'http://x:1' } | ConvertTo-Json) | Out-Null; 200 } catch { [int]$_.Exception.Response.StatusCode }
+Check ($code -eq 403) "used invite cannot be used again ($code)"
 
 # ---------------------------------------------------------------------------
 Section "1. host -> local, every column type"
@@ -208,17 +247,27 @@ WaitHealthy host
 AssertSynced 'catch up after conduit-host restart'
 
 # ---------------------------------------------------------------------------
-Section "10. new site joins via snapshot"
-Compose up -d pg-branch 2>&1 | Out-Null
-for ($i = 0; $i -lt 60 -and (docker compose --profile branch exec -T pg-branch pg_isready -U postgres -d app 2>$null) -notmatch 'accepting'; $i++) { Start-Sleep 1 }
-Start-Sleep 2
-$snap = docker compose --profile branch run --rm --no-deps conduit-branch -config /etc/conduit/conduit.yaml -snapshot-from host 2>&1 | ForEach-Object { "$_" }
-Check ($LASTEXITCODE -eq 0) 'snapshot command succeeded'
-$snap | Select-String 'snapshot applied' | ForEach-Object { Write-Host "        $($_.Line.Trim())" }
-Compose up -d conduit-branch 2>&1 | Out-Null
-WaitHealthy branch
+Section "10. new site with nothing configured: auto Postgres setup, LAN discovery, approval"
+Compose up -d pg-branch conduit-branch 2>&1 | Out-Null
+$bs = WaitPhase branch 'needs_restart'
+Check ($null -ne $bs -and $bs.notice -match 'restart') 'branch set wal_level/track_commit_timestamp itself and asks for one restart'
+Compose restart pg-branch 2>&1 | Out-Null
+$bs = WaitPhase branch 'waiting_to_join'
+$deadline = (Get-Date).AddSeconds(60)
+while ((Get-Date) -lt $deadline -and ((Status branch).pairing.status -ne 'requested')) { Start-Sleep 1 }
+$pair = (Status branch).pairing
+Check ($pair.status -eq 'requested' -and $pair.seed_id -eq 'host') "branch found host on the LAN and asked to join (code $($pair.code))"
+$req = (Status host).join_requests | Where-Object node_id -eq 'branch' | Select-Object -First 1
+Check ($null -ne $req -and $req.code -eq $pair.code) 'host dashboard shows the same pairing code'
+Check ((Admin host "/v1/admin/requests/$($req.id)/approve" 'wrong') -eq 401) 'approval needs the admin password'
+Check ((Admin host "/v1/admin/requests/$($req.id)/approve") -eq 204) 'admin approved branch'
+$bs = WaitPhase branch 'running'
+Check ($null -ne $bs -and $bs.sequences.offset -eq 3) 'branch joined (id slot 3), tables and data copied'
 $script:nodes = @('host', 'local', 'branch')
 AssertSynced 'branch matches host and local'
+Start-Sleep 12
+$lp = @((Status local).peers | ForEach-Object id)
+Check ($lp -contains 'branch' -and $lp -contains 'host') 'local learned about branch by gossip'
 Sql branch "INSERT INTO customers (code, name) VALUES ('C-BR', 'จาก branch')" | Out-Null
 Sql local  "INSERT INTO customers (code, name) VALUES ('C-L3', 'local after branch joined')" | Out-Null
 Sql host   "UPDATE customers SET vip = true WHERE code = 'C-A'" | Out-Null
@@ -232,6 +281,7 @@ Check ($spurious -eq '0') "no spurious conflicts on the new site ($spurious)"
 # ---------------------------------------------------------------------------
 Section "11. protocol safety"
 $before = [int](Sql local "SELECT applied_seq FROM conduit.inbox_state WHERE origin = 'host'")
+$token = Sql local "SELECT token FROM conduit.node"
 $batch = @{ origin = 'host'; txs = @(@{ seq = 1; lsn = '0/0'; commit_time = (Get-Date).ToString('o'); changes = @(
     @{ op = 'I'; s = 'public'; t = 'customers'; new = @(@{ n = 'id'; k = $true; v = '999999' }, @{ n = 'name'; v = 'replayed-must-not-appear' }) }) }) }
 $ack = Invoke-RestMethod "http://127.0.0.1:7421/v1/apply" -Method Post -ContentType 'application/json' `
@@ -254,6 +304,18 @@ $mesh = Invoke-RestMethod "http://127.0.0.1:7420/v1/mesh"
 $localNode = $mesh.nodes | Where-Object id -eq 'local'
 Check (-not $localNode.reachable) 'mesh marks a cut site unreachable'
 HealWan local
+
+# ---------------------------------------------------------------------------
+Section "13. remove a site"
+Check ((Admin host '/v1/admin/members/branch/remove') -eq 204) 'admin removed branch on host'
+Start-Sleep 15
+$hp = @((Status host).peers | ForEach-Object id); $lp = @((Status local).peers | ForEach-Object id)
+Check (-not ($hp -contains 'branch') -and -not ($lp -contains 'branch')) 'host and local stopped syncing to branch'
+Check ((Status branch).removed -eq $true) 'branch knows it was removed'
+Check ((Sql host "SELECT count(*) FROM conduit.peer_cursor WHERE peer_id = 'branch'") -eq '0') 'branch no longer holds back the outbox'
+$script:nodes = @('host', 'local')
+Sql host "INSERT INTO customers (code, name) VALUES ('AFTER-REMOVE', 'x')" | Out-Null
+AssertSynced 'host and local keep syncing'
 
 # ---------------------------------------------------------------------------
 Write-Host ""
