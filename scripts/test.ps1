@@ -365,6 +365,16 @@ Sql host "INSERT INTO customers (code, name) VALUES ('AFTER-REMOVE', 'x')" | Out
 AssertSynced 'host and local keep syncing'
 
 # ---------------------------------------------------------------------------
+Section "14. apps using an ordinary (non-superuser) database role"
+Sql host "CREATE ROLE app_user LOGIN PASSWORD 'x'; GRANT CREATE, USAGE ON SCHEMA public TO app_user;" | Out-Null
+Sql local "CREATE ROLE app_user LOGIN PASSWORD 'x'; GRANT USAGE ON SCHEMA public TO app_user; GRANT INSERT ON stock_lots TO app_user;" | Out-Null
+$inc = Sql host "SET ROLE app_user; CREATE TABLE app_made (id SERIAL PRIMARY KEY); RESET ROLE; SELECT increment_by FROM pg_sequences WHERE sequencename = 'app_made_id_seq';"
+Check ($inc -eq '10') "table created by an app role gets per-site ids at once (increment $inc)"
+Check ((Sql host "SET ROLE app_user; SELECT has_table_privilege('conduit.node', 'SELECT')") -match 'f') 'app role cannot read Conduit secrets'
+$guard = try { Sql local "SET ROLE app_user; INSERT INTO stock_lots (sku, qty) VALUES ('X', 1);"; '' } catch { "$_" }
+Check ($guard -match 'owned by node "host"') 'owner-only guard gives its real message to an app role'
+
+# ---------------------------------------------------------------------------
 Write-Host ""
 foreach ($n in $script:nodes) {
     $s = Status $n

@@ -94,6 +94,12 @@ func (a *Applier) ensure(ctx context.Context, origin string) error {
 		}
 		// Like Postgres' own apply workers: don't fire user triggers (audit
 		// logs, owner guards) a second time and don't enforce FK order.
+		// The fast path writes values as SQL literals; they are only safe
+		// with standard_conforming_strings on (backslashes are not escapes).
+		if _, err := conn.Exec(ctx, `SET standard_conforming_strings = on`); err != nil {
+			conn.Close(ctx)
+			return err
+		}
 		if _, err := conn.Exec(ctx, `SET session_replication_role = replica`); err != nil {
 			conn.Close(ctx)
 			return err

@@ -44,7 +44,11 @@ func Setup(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config, log *slo
 // warns on failure: it must never break the user's DDL.
 var alignSQL = []string{
 	`ALTER TABLE conduit.node ADD COLUMN IF NOT EXISTS schemas TEXT[] NOT NULL DEFAULT '{public}'`,
-	`CREATE OR REPLACE FUNCTION conduit.align_sequences() RETURNS integer LANGUAGE plpgsql AS $fn$
+	// SECURITY DEFINER: it runs with Conduit's rights even when an app's
+	// ordinary database user creates the table (that user cannot alter
+	// sequences it does not own, nor read the conduit schema).
+	`CREATE OR REPLACE FUNCTION conduit.align_sequences() RETURNS integer LANGUAGE plpgsql
+	SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
 	DECLARE
 		r record; v_step bigint; v_off bigint; v_schemas text[];
 		v_max bigint; v_last bigint; v_called boolean; v_inc bigint; v_next bigint; v_floor bigint; v_target bigint;
@@ -87,6 +91,11 @@ var alignSQL = []string{
 	EXCEPTION WHEN OTHERS THEN
 		RAISE WARNING 'conduit: could not align id sequences: %', SQLERRM;
 	END $fn$`,
+	// Every user must be able to reach these two functions (the event
+	// trigger and owner guards run as the user doing the DDL / write);
+	// Conduit's tables stay private.
+	`GRANT USAGE ON SCHEMA conduit TO PUBLIC`,
+	`GRANT EXECUTE ON FUNCTION conduit.align_sequences(), conduit.align_on_ddl(), conduit.owner_guard() TO PUBLIC`,
 	`DO $do$ BEGIN
 		IF NOT EXISTS (SELECT 1 FROM pg_event_trigger WHERE evtname = 'conduit_align_ids') THEN
 			CREATE EVENT TRIGGER conduit_align_ids ON ddl_command_end
