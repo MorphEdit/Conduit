@@ -33,11 +33,32 @@ type Change struct {
 }
 
 // Tx is one committed source transaction, stored as one outbox row.
+//
+// A big source transaction is split into several Tx parts with the same LSN
+// and increasing Part numbers; every part but the last has Partial set. The
+// receiver keeps partial parts on disk and applies them all, in one database
+// transaction, when the last part arrives.
 type Tx struct {
 	Seq        int64     `json:"seq"`
 	LSN        string    `json:"lsn"`
 	CommitTime time.Time `json:"commit_time"`
+	Part       int       `json:"part,omitempty"`
+	Partial    bool      `json:"partial,omitempty"`
 	Changes    []Change  `json:"changes"`
+}
+
+// Size estimates how many bytes a change takes once encoded.
+func (c Change) Size() int {
+	n := 48 + len(c.Schema) + len(c.Table)
+	for _, cols := range [][]Column{c.New, c.Old} {
+		for _, col := range cols {
+			n += 16 + len(col.Name)
+			if col.Value != nil {
+				n += len(*col.Value)
+			}
+		}
+	}
+	return n
 }
 
 // Batch is what a sender POSTs to a peer.

@@ -21,6 +21,7 @@ type PendingJoin struct {
 	Code      string    `json:"code"`
 	Status    string    `json:"status"` // pending | approved | rejected
 	CreatedAt time.Time `json:"created_at"`
+	From      string    `json:"from"` // requester's IP address
 
 	secretHash string
 	invite     string
@@ -34,9 +35,13 @@ type Requests struct {
 }
 
 const (
-	maxPending = 20
-	requestTTL = time.Hour
+	maxPending      = 50
+	maxPendingPerIP = 2
+	requestTTL      = 15 * time.Minute
 )
+
+// ErrTooMany means the request queue (or this address's share of it) is full.
+var ErrTooMany = errors.New("too many pending join requests")
 
 func NewRequests() *Requests { return &Requests{m: map[string]*PendingJoin{}} }
 
@@ -48,21 +53,32 @@ func (r *Requests) gc() {
 	}
 }
 
-// Add records a request, replacing any earlier one from the same site.
-func (r *Requests) Add(nodeID, url, code, secret string) (string, error) {
+// Add records a request from the given address, replacing any earlier one
+// from the same site. Each address may have only a couple pending, so one
+// machine cannot fill the queue and lock real sites out.
+func (r *Requests) Add(from, nodeID, url, code, secret string) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.gc()
+	fromIP := 0
 	for id, p := range r.m {
-		if p.NodeID == nodeID && p.Status == "pending" {
+		if p.Status != "pending" {
+			continue
+		}
+		if p.NodeID == nodeID && p.From == from {
 			delete(r.m, id)
+			continue
+		}
+		if p.From == from {
+			fromIP++
 		}
 	}
-	if len(r.m) >= maxPending {
-		return "", errors.New("too many pending join requests")
+	if fromIP >= maxPendingPerIP || len(r.m) >= maxPending {
+		return "", ErrTooMany
 	}
 	id := randomHex(8)
-	r.m[id] = &PendingJoin{ID: id, NodeID: nodeID, URL: url, Code: code, Status: "pending", CreatedAt: time.Now(), secretHash: hashSecret(secret)}
+	r.m[id] = &PendingJoin{ID: id, NodeID: nodeID, URL: url, Code: code, Status: "pending", CreatedAt: time.Now(),
+		From: from, secretHash: hashSecret(secret)}
 	return id, nil
 }
 

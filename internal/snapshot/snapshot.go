@@ -23,10 +23,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/conduit-sync/conduit/internal/apply"
-	"github.com/conduit-sync/conduit/internal/change"
-	"github.com/conduit-sync/conduit/internal/config"
-	"github.com/conduit-sync/conduit/internal/peer"
+	"github.com/MorphEdit/conduit/internal/apply"
+	"github.com/MorphEdit/conduit/internal/change"
+	"github.com/MorphEdit/conduit/internal/config"
+	"github.com/MorphEdit/conduit/internal/peer"
 )
 
 type line struct {

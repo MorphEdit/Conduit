@@ -20,9 +20,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/conduit-sync/conduit/internal/change"
-	"github.com/conduit-sync/conduit/internal/config"
-	"github.com/conduit-sync/conduit/internal/store"
+	"github.com/MorphEdit/conduit/internal/change"
+	"github.com/MorphEdit/conduit/internal/config"
+	"github.com/MorphEdit/conduit/internal/store"
 )
 
 // Applier owns one dedicated connection, tagged with a replication origin
@@ -71,7 +71,11 @@ func (a *Applier) Apply(ctx context.Context, b change.Batch) change.Ack {
 		if tx.Seq <= applied {
 			continue
 		}
-		if err := a.applyTx(ctx, b.Origin, tx); err != nil {
+		apply := a.applyTx
+		if tx.Partial {
+			apply = a.spoolPart
+		}
+		if err := apply(ctx, b.Origin, tx); err != nil {
 			if a.conn.IsClosed() {
 				a.reset()
 			}
@@ -137,6 +141,32 @@ func (a *Applier) begin(ctx context.Context, lsn string, at time.Time) (pgx.Tx, 
 	return tx, nil
 }
 
+// spoolPart stores one part of a big transaction on disk; nothing is applied
+// until the last part arrives. The part counts as delivered (applied_seq).
+func (a *Applier) spoolPart(ctx context.Context, origin string, t change.Tx) error {
+	payload, err := json.Marshal(t.Changes)
+	if err != nil {
+		return err
+	}
+	tx, err := a.conn.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO conduit.spool (origin, lsn, part, payload) VALUES ($1, $2::pg_lsn, $3, $4)
+		 ON CONFLICT DO NOTHING`, origin, t.LSN, t.Part, payload); err != nil {
+		return err
+	}
+	if err := setApplied(ctx, tx, origin, t.Seq); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// applyTx applies a whole source transaction in one local transaction:
+// first any parts waiting in the spool (one at a time, so memory stays
+// small), then the final part.
 func (a *Applier) applyTx(ctx context.Context, origin string, t change.Tx) error {
 	tx, err := a.begin(ctx, t.LSN, t.CommitTime)
 	if err != nil {
@@ -144,19 +174,56 @@ func (a *Applier) applyTx(ctx context.Context, origin string, t change.Tx) error
 	}
 	defer tx.Rollback(ctx)
 
-	for i, ch := range t.Changes {
-		r := &row{origin: origin, at: t.CommitTime, ch: ch}
-		if err := a.applyChange(ctx, tx, r); err != nil {
-			return fmt.Errorf("change %d (%s %s.%s): %w", i, ch.Op, ch.Schema, ch.Table, err)
+	applyAll := func(changes []change.Change) error {
+		if done, err := a.applyFast(ctx, tx, origin, t.CommitTime, changes); done || err != nil {
+			return err
+		}
+		for i, ch := range changes {
+			r := &row{origin: origin, at: t.CommitTime, ch: ch}
+			if err := a.applyChange(ctx, tx, r); err != nil {
+				return fmt.Errorf("change %d (%s %s.%s): %w", i, ch.Op, ch.Schema, ch.Table, err)
+			}
+		}
+		return nil
+	}
+	for part := 0; part < t.Part; part++ {
+		var payload []byte
+		err := tx.QueryRow(ctx, `SELECT payload FROM conduit.spool WHERE origin = $1 AND lsn = $2::pg_lsn AND part = $3`,
+			origin, t.LSN, part).Scan(&payload)
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue // already contained in a snapshot this site started from
+		}
+		if err != nil {
+			return err
+		}
+		var changes []change.Change
+		if err := json.Unmarshal(payload, &changes); err != nil {
+			return fmt.Errorf("spooled part %d: %w", part, err)
+		}
+		if err := applyAll(changes); err != nil {
+			return fmt.Errorf("part %d: %w", part, err)
 		}
 	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO conduit.inbox_state (origin, applied_seq, updated_at) VALUES ($1, $2, now())
-		 ON CONFLICT (origin) DO UPDATE SET applied_seq = EXCLUDED.applied_seq, updated_at = now()`,
-		origin, t.Seq); err != nil {
+	if err := applyAll(t.Changes); err != nil {
+		return err
+	}
+	if t.Part > 0 {
+		if _, err := tx.Exec(ctx, `DELETE FROM conduit.spool WHERE origin = $1 AND lsn = $2::pg_lsn`, origin, t.LSN); err != nil {
+			return err
+		}
+	}
+	if err := setApplied(ctx, tx, origin, t.Seq); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+func setApplied(ctx context.Context, tx pgx.Tx, origin string, seq int64) error {
+	_, err := tx.Exec(ctx,
+		`INSERT INTO conduit.inbox_state (origin, applied_seq, updated_at) VALUES ($1, $2, now())
+		 ON CONFLICT (origin) DO UPDATE SET applied_seq = EXCLUDED.applied_seq, updated_at = now()`,
+		origin, seq)
+	return err
 }
 
 // row is one remote change in flight.
@@ -175,7 +242,9 @@ const (
 	kindDeleteUpdate = "delete_update" // remote update/insert is older than a local delete
 	kindUpdateDelete = "update_delete" // remote delete is older than a local update
 	kindUnique       = "unique_violation"
-	kindOwner        = "owner_violation"
+	// KindSchema marks changes skipped because the local table differs.
+	KindSchema = "schema_mismatch"
+	kindOwner  = "owner_violation"
 )
 
 // applyChange runs one change inside a savepoint so a unique violation on
@@ -203,11 +272,103 @@ func (a *Applier) applyChange(ctx context.Context, tx pgx.Tx, r *row) error {
 		sp.Rollback(ctx)
 		return a.conflict(ctx, tx, r, kindUnique, "skipped", pgErr.Message+" ("+pgErr.ConstraintName+")")
 	}
+	if errors.As(err, &pgErr) && schemaMismatch[pgErr.Code] {
+		// The table here does not look like the sender's. Keep the change in
+		// the conflict log (it can be replayed once the schema is fixed) and
+		// let the rest of the queue through.
+		sp.Rollback(ctx)
+		return a.conflict(ctx, tx, r, KindSchema, "skipped", pgErr.Message)
+	}
 	if err != nil {
 		sp.Rollback(ctx)
 		return err
 	}
 	return sp.Commit(ctx)
+}
+
+// Errors that mean the local table does not match the sender's: missing
+// table or column, wrong type, or a NOT NULL column the sender does not have.
+var schemaMismatch = map[string]bool{
+	"42P01": true, // undefined_table
+	"42703": true, // undefined_column
+	"42804": true, // datatype_mismatch
+	"22P02": true, // invalid_text_representation
+	"23502": true, // not_null_violation
+}
+
+// ReplaySkipped tries again every change that was skipped for a schema
+// mismatch, oldest first, e.g. after the missing table or column was added.
+// Changes are still compared by commit time, so newer local data wins.
+func (a *Applier) ReplaySkipped(ctx context.Context) (replayed, failed int, err error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.conn == nil || a.conn.IsClosed() {
+		if err := a.ensure(ctx, "replay"); err != nil {
+			a.reset()
+			return 0, 0, err
+		}
+	}
+	type skipped struct {
+		id     int64
+		origin string
+		at     time.Time
+		ch     change.Change
+	}
+	rows, err := a.conn.Query(ctx, `SELECT id, origin, remote_time, change FROM conduit.conflicts
+		WHERE kind = $1 AND resolution = 'skipped' ORDER BY id`, KindSchema)
+	if err != nil {
+		return 0, 0, err
+	}
+	var list []skipped
+	for rows.Next() {
+		var s skipped
+		var raw []byte
+		if err := rows.Scan(&s.id, &s.origin, &s.at, &raw); err != nil {
+			rows.Close()
+			return 0, 0, err
+		}
+		if json.Unmarshal(raw, &s.ch) == nil {
+			list = append(list, s)
+		}
+	}
+	rows.Close()
+	for _, s := range list {
+		if err := a.ensure(ctx, s.origin); err != nil {
+			return replayed, failed, err
+		}
+		tx, err := a.begin(ctx, "0/0", s.at)
+		if err != nil {
+			return replayed, failed, err
+		}
+		r := &row{origin: s.origin, at: s.at, ch: s.ch}
+		var pgErr *pgconn.PgError
+		sp, _ := tx.Begin(ctx)
+		switch s.ch.Op {
+		case "I", "U":
+			err = a.upsert(ctx, sp, tx, r)
+		case "D":
+			err = a.remove(ctx, sp, tx, r)
+		}
+		if err == nil {
+			err = sp.Commit(ctx)
+		}
+		if err == nil {
+			_, err = tx.Exec(ctx, `UPDATE conduit.conflicts SET resolution = 'replayed' WHERE id = $1`, s.id)
+		}
+		if err == nil {
+			err = tx.Commit(ctx)
+		}
+		if err != nil {
+			tx.Rollback(ctx)
+			if errors.As(err, &pgErr) {
+				failed++
+				continue // still does not fit; leave it for the next replay
+			}
+			return replayed, failed, err
+		}
+		replayed++
+	}
+	return replayed, failed, nil
 }
 
 // localNewer reports whether the row exists locally and whether its last
@@ -291,7 +452,7 @@ func (a *Applier) conflict(ctx context.Context, tx pgx.Tx, r *row, kind, resolut
 	_, err = tx.Exec(ctx,
 		`INSERT INTO conduit.conflicts (origin, schema_name, table_name, pk, kind, resolution, remote_time, change, detail)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		r.origin, r.ch.Schema, r.ch.Table, r.pk(), kind, resolution, r.at, payload, detail)
+		r.origin, r.ch.Schema, r.ch.Table, r.pk(), kind, resolution, r.at, string(payload), detail)
 	return err
 }
 
@@ -307,9 +468,18 @@ func hasUnchanged(cols []change.Column) bool {
 // Values travel as text and are sent as untyped SQL literals (simple
 // protocol), so Postgres casts them to each column's type exactly as it
 // would for pgoutput's own text output.
-type args struct{ vals []any }
+//
+// With literal set, values are written straight into the SQL text instead
+// (used to send a whole chunk as one multi-statement query).
+type args struct {
+	vals    []any
+	literal bool
+}
 
 func (a *args) add(c change.Column) string {
+	if a.literal {
+		return lit(c.Value)
+	}
 	if c.Value == nil {
 		a.vals = append(a.vals, nil)
 	} else {
@@ -319,8 +489,19 @@ func (a *args) add(c change.Column) string {
 }
 
 func (a *args) addText(s string) string {
+	if a.literal {
+		return lit(&s)
+	}
 	a.vals = append(a.vals, s)
 	return "$" + strconv.Itoa(len(a.vals))
+}
+
+// lit renders a value as an untyped SQL literal (standard_conforming_strings).
+func lit(v *string) string {
+	if v == nil {
+		return "NULL"
+	}
+	return "'" + strings.ReplaceAll(*v, "'", "''") + "'"
 }
 
 func (a *args) params() []any { return append([]any{pgx.QueryExecModeSimpleProtocol}, a.vals...) }
@@ -342,6 +523,11 @@ func where(a *args, keys []change.Column) string {
 
 func insert(ctx context.Context, tx pgx.Tx, r *row) error {
 	var a args
+	_, err := a.exec(ctx, tx, insertSQL(&a, r))
+	return err
+}
+
+func insertSQL(a *args, r *row) string {
 	var names, vals []string
 	for _, c := range r.ch.New {
 		if c.Unchanged {
@@ -351,13 +537,21 @@ func insert(ctx context.Context, tx pgx.Tx, r *row) error {
 		vals = append(vals, a.add(c))
 	}
 	// OVERRIDING SYSTEM VALUE keeps the origin's id for GENERATED ALWAYS columns.
-	_, err := a.exec(ctx, tx, fmt.Sprintf("INSERT INTO %s (%s) OVERRIDING SYSTEM VALUE VALUES (%s)",
-		r.table(), strings.Join(names, ", "), strings.Join(vals, ", ")))
-	return err
+	return fmt.Sprintf("INSERT INTO %s (%s) OVERRIDING SYSTEM VALUE VALUES (%s)",
+		r.table(), strings.Join(names, ", "), strings.Join(vals, ", "))
 }
 
 func update(ctx context.Context, tx pgx.Tx, r *row, keys []change.Column) error {
 	var a args
+	sql := updateSQL(&a, r, keys)
+	if sql == "" {
+		return nil
+	}
+	_, err := a.exec(ctx, tx, sql)
+	return err
+}
+
+func updateSQL(a *args, r *row, keys []change.Column) string {
 	var sets []string
 	keyChanged := len(r.ch.Old) > 0
 	for _, c := range r.ch.New {
@@ -367,10 +561,9 @@ func update(ctx context.Context, tx pgx.Tx, r *row, keys []change.Column) error 
 		}
 	}
 	if len(sets) == 0 {
-		return nil
+		return ""
 	}
-	_, err := a.exec(ctx, tx, fmt.Sprintf("UPDATE %s SET %s WHERE %s", r.table(), strings.Join(sets, ", "), where(&a, keys)))
-	return err
+	return fmt.Sprintf("UPDATE %s SET %s WHERE %s", r.table(), strings.Join(sets, ", "), where(a, keys))
 }
 
 // ApplyBaseline writes snapshot rows that share one commit timestamp. The

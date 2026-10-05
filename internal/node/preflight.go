@@ -6,6 +6,7 @@ package node
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -33,14 +34,24 @@ func missingSettings(ctx context.Context, pool *pgxpool.Pool) ([][2]string, erro
 }
 
 func (r *Runtime) ensurePostgres(ctx context.Context, pool *pgxpool.Pool) error {
-	altered := false
+	altered, allowed := false, r.Cfg.ConfigurePostgres
 	for {
 		missing, err := missingSettings(ctx, pool)
 		r.setErr(err)
 		if err == nil && len(missing) == 0 {
 			return nil
 		}
-		if err == nil && !altered {
+		names := make([]string, len(missing))
+		for i, m := range missing {
+			names[i] = m[0] + "=" + m[1]
+		}
+		if err == nil && !altered && !allowed {
+			// Never change a database's settings without a yes: it may be a
+			// production database, and the change needs a restart.
+			r.setPhase(PhaseNeedsConfig, "Postgres ยังตั้งค่าไม่พร้อม ("+strings.Join(names, ", ")+
+				") — กด \"อนุญาตให้ตั้งค่า\" บน dashboard แล้ว restart Postgres หนึ่งครั้ง หรือตั้งค่าเองแล้ว restart")
+		}
+		if err == nil && !altered && allowed {
 			for _, s := range missing {
 				// ALTER SYSTEM takes no parameters; names and values are the constants above.
 				if _, err = pool.Exec(ctx, "ALTER SYSTEM SET "+s[0]+" = '"+s[1]+"'"); err != nil {
@@ -54,15 +65,18 @@ func (r *Runtime) ensurePostgres(ctx context.Context, pool *pgxpool.Pool) error 
 			r.setErr(err)
 			if err == nil {
 				altered = true
-				r.Log.Warn("changed Postgres settings; restart Postgres once to apply them", "settings", missing)
+				r.Log.Warn("changed Postgres settings; restart Postgres once to apply them", "settings", names)
 			}
 		}
 		if altered {
-			r.setPhase(PhaseNeedsRestart, "ตั้งค่า Postgres ให้แล้ว (wal_level=logical, track_commit_timestamp=on) — restart Postgres หนึ่งครั้งเพื่อให้มีผล")
+			r.setPhase(PhaseNeedsRestart, "ตั้งค่า Postgres ให้แล้ว ("+strings.Join(names, ", ")+") — restart Postgres หนึ่งครั้งเพื่อให้มีผล")
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-r.allowPG:
+			allowed = true
+			r.Log.Info("admin allowed changing Postgres settings")
 		case <-time.After(5 * time.Second):
 		}
 	}

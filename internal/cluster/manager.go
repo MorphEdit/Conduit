@@ -15,11 +15,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/conduit-sync/conduit/internal/config"
-	"github.com/conduit-sync/conduit/internal/notify"
-	"github.com/conduit-sync/conduit/internal/peer"
-	"github.com/conduit-sync/conduit/internal/sender"
-	"github.com/conduit-sync/conduit/internal/store"
+	"github.com/MorphEdit/conduit/internal/config"
+	"github.com/MorphEdit/conduit/internal/notify"
+	"github.com/MorphEdit/conduit/internal/peer"
+	"github.com/MorphEdit/conduit/internal/sender"
+	"github.com/MorphEdit/conduit/internal/store"
 )
 
 const gossipInterval = 10 * time.Second
@@ -38,8 +38,10 @@ type Manager struct {
 	bus        *notify.Bus
 	log        *slog.Logger
 	onSettings func(context.Context)
-	creds      peer.Credentials
-	trigger    chan struct{}
+	// OnRemoved runs once when this site learns it was removed.
+	OnRemoved func()
+	creds     peer.Credentials
+	trigger   chan struct{}
 
 	mu      sync.Mutex
 	senders map[string]*running
@@ -113,7 +115,7 @@ func (m *Manager) round(ctx context.Context) {
 			m.log.Warn("member belongs to another cluster; ignoring", "member", mem.ID, "their_cluster", v.ClusterID)
 			continue
 		}
-		c, err := Merge(ctx, pool, v)
+		c, err := Merge(ctx, pool, v, m.id.ID, mem.ID)
 		if err != nil {
 			m.log.Warn("merge view", "from", mem.ID, "err", err)
 		}
@@ -166,6 +168,9 @@ func (m *Manager) reconcile(ctx context.Context) {
 	defer m.mu.Unlock()
 	if selfRemoved && !m.removed {
 		m.log.Warn("this site was removed from the cluster; sync stopped")
+		if m.OnRemoved != nil {
+			go m.OnRemoved()
+		}
 	}
 	m.removed = selfRemoved
 	if selfRemoved {

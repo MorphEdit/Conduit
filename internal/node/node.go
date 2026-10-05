@@ -21,20 +21,21 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/conduit-sync/conduit/internal/apply"
-	"github.com/conduit-sync/conduit/internal/capture"
-	"github.com/conduit-sync/conduit/internal/cluster"
-	"github.com/conduit-sync/conduit/internal/config"
-	"github.com/conduit-sync/conduit/internal/notify"
-	"github.com/conduit-sync/conduit/internal/peer"
-	"github.com/conduit-sync/conduit/internal/policy"
-	"github.com/conduit-sync/conduit/internal/store"
+	"github.com/MorphEdit/conduit/internal/apply"
+	"github.com/MorphEdit/conduit/internal/capture"
+	"github.com/MorphEdit/conduit/internal/cluster"
+	"github.com/MorphEdit/conduit/internal/config"
+	"github.com/MorphEdit/conduit/internal/notify"
+	"github.com/MorphEdit/conduit/internal/peer"
+	"github.com/MorphEdit/conduit/internal/policy"
+	"github.com/MorphEdit/conduit/internal/store"
 )
 
 // Phases shown on the dashboard.
 const (
 	PhaseStarting     = "starting"
 	PhaseWaitingDB    = "waiting_db"
+	PhaseNeedsConfig  = "needs_config"
 	PhaseNeedsRestart = "needs_restart"
 	PhaseWaitingJoin  = "waiting_to_join"
 	PhaseJoining      = "joining"
@@ -69,10 +70,12 @@ type Runtime struct {
 	applier  *apply.Applier
 	pairing  *Pairing
 	pasted   chan string
+	allowPG  chan struct{}
 }
 
 func New(cfg *config.Config, log *slog.Logger) *Runtime {
-	return &Runtime{Cfg: cfg, Log: log, Requests: cluster.NewRequests(), phase: PhaseStarting, pasted: make(chan string, 1)}
+	return &Runtime{Cfg: cfg, Log: log, Requests: cluster.NewRequests(), phase: PhaseStarting,
+		pasted: make(chan string, 1), allowPG: make(chan struct{}, 1)}
 }
 
 // View is a consistent snapshot of the runtime for request handlers.
@@ -116,6 +119,18 @@ func (r *Runtime) setErr(err error) {
 			r.err = err.Error()
 		}
 	})
+}
+
+// AllowPostgresConfig records the admin's approval to change Postgres settings.
+func (r *Runtime) AllowPostgresConfig() error {
+	if r.View().Phase != PhaseNeedsConfig {
+		return errors.New("Postgres settings do not need changing")
+	}
+	select {
+	case r.allowPG <- struct{}{}:
+	default:
+	}
+	return nil
 }
 
 // PasteInvite hands an invite code (entered on the dashboard) to a site
@@ -196,7 +211,7 @@ func (r *Runtime) start(ctx context.Context, st *store.Store, id *cluster.Identi
 	cfg.Sequences = &config.SequenceConfig{Offset: id.Offset, Step: id.Step}
 	r.set(func() { r.identity = id })
 
-	if err := cluster.UpdateSelfURL(ctx, pool, id.ID, cfg.Advertise); err != nil {
+	if err := cluster.UpdateSelf(ctx, pool, id.ID, cfg.Advertise, cluster.HashSecret(id.Secret), r.View().TLS.Fingerprint); err != nil {
 		return err
 	}
 	// Table policies: a site whose own config lists them publishes them to
@@ -224,10 +239,30 @@ func (r *Runtime) start(ctx context.Context, st *store.Store, id *cluster.Identi
 	applier := apply.New(cfg, log)
 	defer applier.Close()
 	mgr := cluster.NewManager(cfg, id, st, &bus, applySettings, log)
+	capCtx, stopCapture := context.WithCancel(ctx)
+	defer stopCapture()
+	mgr.OnRemoved = func() {
+		// A removed site has no one to send to: stop capturing, drop the
+		// replication slot (it would hold WAL forever) and clear the queue.
+		stopCapture()
+		for i := 0; i < 20; i++ {
+			_, err := pool.Exec(ctx, `SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots
+				WHERE slot_name = $1 AND NOT active`, cfg.Capture.Slot)
+			var left int
+			pool.QueryRow(ctx, `SELECT count(*) FROM pg_replication_slots WHERE slot_name = $1`, cfg.Capture.Slot).Scan(&left)
+			if err == nil && left == 0 {
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		pool.Exec(ctx, `TRUNCATE conduit.outbox, conduit.peer_cursor, conduit.spool`)
+		r.setPhase(PhaseRunning, "ไซต์นี้ถูกถอดออกจากเครือข่ายแล้ว — หยุดซิงก์ ลบ replication slot และล้างคิวแล้ว")
+		log.Warn("removed from the cluster: capture stopped, slot dropped, outbox cleared")
+	}
 
 	var wg sync.WaitGroup
 	goRun := func(f func()) { wg.Add(1); go func() { defer wg.Done(); f() }() }
-	goRun(func() { capt.Run(ctx) })
+	goRun(func() { capt.Run(capCtx) })
 	goRun(func() { mgr.Run(ctx) })
 	goRun(func() {
 		for {

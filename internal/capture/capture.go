@@ -19,13 +19,20 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
 
-	"github.com/conduit-sync/conduit/internal/change"
-	"github.com/conduit-sync/conduit/internal/config"
-	"github.com/conduit-sync/conduit/internal/notify"
-	"github.com/conduit-sync/conduit/internal/store"
+	"github.com/MorphEdit/conduit/internal/change"
+	"github.com/MorphEdit/conduit/internal/config"
+	"github.com/MorphEdit/conduit/internal/notify"
+	"github.com/MorphEdit/conduit/internal/store"
 )
 
 const statusInterval = 10 * time.Second
+
+// A transaction is written to the outbox in parts of at most this many
+// changes / bytes, so memory stays small however big the transaction is.
+const (
+	partChanges = 2000
+	partBytes   = 2 << 20
+)
 
 type Status struct {
 	Enabled      bool       `json:"enabled"`
@@ -162,11 +169,34 @@ func (c *Capture) stream(ctx context.Context) error {
 	c.log.Info("streaming changes", "slot", c.cfg.Slot)
 
 	var (
-		confirmed  pglogrepl.LSN
-		inTx       bool
-		pending    []change.Change
-		nextStatus = time.Now().Add(statusInterval)
+		confirmed    pglogrepl.LSN
+		inTx         bool
+		pending      []change.Change
+		pendingBytes int
+		txLSN        string
+		txTime       time.Time
+		part         int
+		nextStatus   = time.Now().Add(statusInterval)
 	)
+	// flush writes the changes collected so far as one part of the current
+	// transaction. The (lsn, part) key makes a replay after a crash harmless.
+	flush := func(final bool) error {
+		if err := c.store.AppendOutbox(ctx, txLSN, part, final, txTime, pending); err != nil {
+			return fmt.Errorf("append outbox: %w", err)
+		}
+		part++
+		pending, pendingBytes = nil, 0
+		c.bus.Publish()
+		return nil
+	}
+	add := func(ch change.Change) error {
+		pending = append(pending, ch)
+		pendingBytes += ch.Size()
+		if len(pending) >= partChanges || pendingBytes >= partBytes {
+			return flush(false)
+		}
+		return nil
+	}
 	for {
 		if !time.Now().Before(nextStatus) {
 			if confirmed > 0 {
@@ -230,39 +260,45 @@ func (c *Capture) stream(ctx context.Context) error {
 			case *pglogrepl.RelationMessage:
 				c.relations[m.RelationID] = m
 			case *pglogrepl.BeginMessage:
-				inTx, pending = true, nil
+				inTx, pending, pendingBytes, part = true, nil, 0, 0
+				txLSN, txTime = m.FinalLSN.String(), m.CommitTime
 			case *pglogrepl.InsertMessage:
 				ch, err := c.row("I", m.RelationID, m.Tuple, nil)
 				if err != nil {
 					return err
 				}
-				pending = append(pending, ch)
+				if err := add(ch); err != nil {
+					return err
+				}
 			case *pglogrepl.UpdateMessage:
 				ch, err := c.row("U", m.RelationID, m.NewTuple, m.OldTuple)
 				if err != nil {
 					return err
 				}
-				pending = append(pending, ch)
+				if err := add(ch); err != nil {
+					return err
+				}
 			case *pglogrepl.DeleteMessage:
 				ch, err := c.row("D", m.RelationID, nil, m.OldTuple)
 				if err != nil {
 					return err
 				}
-				pending = append(pending, ch)
+				if err := add(ch); err != nil {
+					return err
+				}
 			case *pglogrepl.TruncateMessage:
 				c.log.Warn("TRUNCATE is not replicated; run it on every node yourself")
 			case *pglogrepl.CommitMessage:
-				if len(pending) > 0 {
+				if len(pending) > 0 || part > 0 {
 					// Durably queue before confirming the slot position:
 					// a crash here replays the transaction, never loses it.
-					if err := c.store.AppendOutbox(ctx, m.CommitLSN.String(), m.CommitTime, pending); err != nil {
-						return fmt.Errorf("append outbox: %w", err)
+					if err := flush(true); err != nil {
+						return err
 					}
 					c.committed(m.CommitTime)
-					c.bus.Publish()
 				}
 				confirmed = m.TransactionEndLSN
-				inTx, pending = false, nil
+				inTx, pending, part = false, nil, 0
 				nextStatus = time.Time{}
 			}
 		}

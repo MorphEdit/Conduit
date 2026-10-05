@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/conduit-sync/conduit/internal/cluster"
-	. "github.com/conduit-sync/conduit/internal/peer"
+	"github.com/MorphEdit/conduit/internal/cluster"
+	. "github.com/MorphEdit/conduit/internal/peer"
 )
 
 func tlsServer(t *testing.T, m *cluster.TLSMaterial) *httptest.Server {

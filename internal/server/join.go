@@ -7,13 +7,15 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"os/exec"
 	"strings"
 	"time"
 
-	"github.com/conduit-sync/conduit/internal/cluster"
-	"github.com/conduit-sync/conduit/internal/config"
+	"github.com/MorphEdit/conduit/internal/cluster"
+	"github.com/MorphEdit/conduit/internal/config"
+	"github.com/MorphEdit/conduit/internal/pgcli"
 )
 
 const inviteTTL = 24 * time.Hour
@@ -52,6 +54,13 @@ func (s *Server) joinRequest(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.running(w); !ok {
 		return
 	}
+	// LAN discovery is for the local network only; other sites use invites.
+	host, _, _ := net.SplitHostPort(r.RemoteAddr)
+	ip := net.ParseIP(host)
+	if ip == nil || !(ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast()) {
+		http.Error(w, "join requests are only accepted from the local network; use an invite code", http.StatusForbidden)
+		return
+	}
 	var body struct {
 		NodeID string `json:"node_id"`
 		URL    string `json:"url"`
@@ -63,7 +72,7 @@ func (s *Server) joinRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	id, err := s.rt.Requests.Add(body.NodeID, body.URL, body.Code, body.Secret)
+	id, err := s.rt.Requests.Add(host, body.NodeID, body.URL, body.Code, body.Secret)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusTooManyRequests)
 		return
@@ -87,8 +96,11 @@ func (s *Server) schema(w http.ResponseWriter, r *http.Request, _ string) {
 	for _, sc := range s.cfg.Capture.Schemas {
 		args = append(args, "--schema="+sc)
 	}
-	args = append(args, "--dbname="+s.cfg.Database)
-	out, err := exec.CommandContext(r.Context(), "pg_dump", args...).Output()
+	dbname, env := pgcli.Conn(s.cfg.Database) // password goes in the environment, not the process list
+	args = append(args, "--dbname="+dbname)
+	cmd := exec.CommandContext(r.Context(), "pg_dump", args...)
+	cmd.Env = env
+	out, err := cmd.Output()
 	if err != nil {
 		var ee *exec.ExitError
 		msg := err.Error()
@@ -161,6 +173,30 @@ func (s *Server) removeMember(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Info("site removed from cluster", "site", id)
 	v.Manager.Trigger()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// replay re-applies changes skipped for a schema mismatch.
+func (s *Server) replay(w http.ResponseWriter, r *http.Request) {
+	v, ok := s.running(w)
+	if !ok {
+		return
+	}
+	done, failed, err := v.Applier.ReplaySkipped(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.log.Info("replayed skipped changes", "replayed", done, "still_failing", failed)
+	writeJSON(w, map[string]int{"replayed": done, "still_failing": failed})
+}
+
+// configurePostgres is the admin's go-ahead to change Postgres settings.
+func (s *Server) configurePostgres(w http.ResponseWriter, _ *http.Request) {
+	if err := s.rt.AllowPostgresConfig(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -16,6 +16,7 @@ Conduit reads an optional YAML file (`-config`, default `/etc/conduit/conduit.ya
 | `CONDUIT_LISTEN` | `:7420` | Dashboard address |
 | `CONDUIT_PEER_LISTEN` | `:7443` | HTTPS address for other sites |
 | `CONDUIT_DISCOVERY` | `true` | Announce / listen on the LAN (UDP 7420) |
+| `CONDUIT_CONFIGURE_POSTGRES` | `false` | Change `wal_level` / `track_commit_timestamp` without asking. Otherwise the dashboard asks an admin first. |
 
 ## YAML
 
@@ -40,6 +41,7 @@ outbox_retention: 1h                # keep delivered changes a while for sites
 |---|---|
 | `conduit` | Run the site |
 | `conduit invite` | Print a one-time invite code (valid 24 h) |
+| `conduit cleanup --yes` | Remove Conduit from this database (slot, publication, event trigger, `conduit` schema). Stop Conduit first. |
 | `conduit version` | Print the version |
 
 ## Id ranges
@@ -47,3 +49,5 @@ outbox_retention: 1h                # keep delivered changes a while for sites
 Every site gets its own id slot (1, 2, 3…, up to 10). `SERIAL` / `IDENTITY` columns on site *n* then
 produce ids ending in *n* (`id % 10 = n`), so two sites never create the same id, even offline.
 Removed sites keep their slot so old rows never collide with new ones.
+An event trigger re-aligns sequences the moment a table is created or altered, so new tables are safe
+without restarting Conduit.

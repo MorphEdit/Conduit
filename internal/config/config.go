@@ -37,6 +37,10 @@ type Config struct {
 	Bootstrap bool   `yaml:"bootstrap"`
 	Join      string `yaml:"join"`
 	Discovery bool   `yaml:"discovery"`
+	// ConfigurePostgres lets Conduit change Postgres settings (wal_level,
+	// track_commit_timestamp) without asking. Otherwise an admin approves it
+	// on the dashboard first.
+	ConfigurePostgres bool `yaml:"configure_postgres"`
 	// AdminPassword unlocks dashboard actions (invite, approve, remove).
 	AdminPassword string `yaml:"admin_password"`
 
@@ -127,6 +131,7 @@ func (c *Config) applyEnv() {
 	str("CONDUIT_ADMIN_PASSWORD", &c.AdminPassword)
 	boolean("CONDUIT_BOOTSTRAP", &c.Bootstrap)
 	boolean("CONDUIT_DISCOVERY", &c.Discovery)
+	boolean("CONDUIT_CONFIGURE_POSTGRES", &c.ConfigurePostgres)
 }
 
 func (c *Config) applyDefaults() {

@@ -6,10 +6,10 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-ARG VERSION=0.1.0
+ARG VERSION=0.2.0
 ARG COMMIT=
 RUN CGO_ENABLED=0 go build -trimpath \
-    -ldflags="-s -w -X github.com/conduit-sync/conduit/internal/buildinfo.Version=${VERSION} -X github.com/conduit-sync/conduit/internal/buildinfo.Commit=${COMMIT}" \
+    -ldflags="-s -w -X github.com/MorphEdit/conduit/internal/buildinfo.Version=${VERSION} -X github.com/MorphEdit/conduit/internal/buildinfo.Commit=${COMMIT}" \
     -o /out/conduit ./cmd/conduit
 
 FROM alpine:3.20
@@ -18,6 +18,7 @@ RUN apk add --no-cache postgresql16-client
 RUN adduser -D -u 10001 conduit
 COPY --from=build /out/conduit /usr/local/bin/conduit
 USER conduit
-EXPOSE 7420
+# 7420/tcp dashboard, 7420/udp LAN discovery, 7443/tcp other sites (TLS)
+EXPOSE 7420 7420/udp 7443
 ENTRYPOINT ["conduit"]
 CMD ["-config", "/etc/conduit/conduit.yaml"]

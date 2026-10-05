@@ -20,7 +20,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/conduit-sync/conduit/internal/peer"
+	"github.com/MorphEdit/conduit/internal/peer"
 )
 
 // Every site has its own self-signed certificate. Other sites trust it by

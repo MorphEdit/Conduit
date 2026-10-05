@@ -37,6 +37,8 @@ h1>span{color:var(--mint)}
 
 /* ---------- banners & joining ---------- */
 .banner{margin:22px 0 0;padding:14px 16px;border:1px solid #6b5a38;border-radius:8px;background:#221d14;color:#f5d9a6;font-size:14px;line-height:1.6}
+.banner{display:flex;gap:14px;align-items:center;flex-wrap:wrap}.banner span{flex:1;min-width:240px}
+.banner .ghost{border-color:#6b5a38;color:#f5d9a6;white-space:nowrap}
 .banner.error{border-color:#6b3a3a;background:#241617;color:#f5b5b5}
 .join-panel{margin:26px 0 8px;display:flex;justify-content:space-between;gap:28px;align-items:center;padding:24px;border:1px solid #3d524c;border-radius:12px;background:var(--surface)}
 .join-panel h2{margin:0;font-size:22px;font-weight:500;letter-spacing:-.5px}

@@ -1,4 +1,4 @@
-module github.com/conduit-sync/conduit
+module github.com/MorphEdit/conduit
 
 go 1.25.0
 

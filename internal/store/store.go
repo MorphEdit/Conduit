@@ -15,7 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/conduit-sync/conduit/internal/change"
+	"github.com/MorphEdit/conduit/internal/change"
 )
 
 var bootstrapSQL = []string{
@@ -23,10 +23,25 @@ var bootstrapSQL = []string{
 	// One row per captured source transaction. seq is the order peers apply in.
 	`CREATE TABLE IF NOT EXISTS conduit.outbox (
 		seq         BIGSERIAL PRIMARY KEY,
-		lsn         PG_LSN      NOT NULL UNIQUE,
+		lsn         PG_LSN      NOT NULL,
 		commit_time TIMESTAMPTZ NOT NULL,
 		payload     JSONB       NOT NULL,
 		created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`,
+	// Big transactions are stored in parts: (lsn, part) is unique, and only
+	// the last part has final = true.
+	`ALTER TABLE conduit.outbox ADD COLUMN IF NOT EXISTS part INT NOT NULL DEFAULT 0`,
+	`ALTER TABLE conduit.outbox ADD COLUMN IF NOT EXISTS final BOOLEAN NOT NULL DEFAULT true`,
+	`ALTER TABLE conduit.outbox DROP CONSTRAINT IF EXISTS outbox_lsn_key`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS outbox_lsn_part ON conduit.outbox (lsn, part)`,
+	// Parts of a big transaction received from a peer, kept on disk until its
+	// last part arrives and the whole transaction is applied at once.
+	`CREATE TABLE IF NOT EXISTS conduit.spool (
+		origin  TEXT   NOT NULL,
+		lsn     PG_LSN NOT NULL,
+		part    INT    NOT NULL,
+		payload JSONB  NOT NULL,
+		PRIMARY KEY (origin, lsn, part)
 	)`,
 	// How far each peer has acknowledged our outbox.
 	`CREATE TABLE IF NOT EXISTS conduit.peer_cursor (
@@ -152,7 +167,8 @@ func (s *Store) DeleteCursor(ctx context.Context, peer string) error {
 // AppendOutbox stores one committed transaction. The unique lsn makes a
 // replay after a crash (before the slot position was confirmed) a no-op.
 // Local deletes also leave a tombstone, written in the same transaction.
-func (s *Store) AppendOutbox(ctx context.Context, lsn string, commitTime time.Time, changes []change.Change) error {
+// part numbers the pieces of one big transaction; final marks the last one.
+func (s *Store) AppendOutbox(ctx context.Context, lsn string, part int, final bool, commitTime time.Time, changes []change.Change) error {
 	payload, err := json.Marshal(changes)
 	if err != nil {
 		return err
@@ -163,8 +179,8 @@ func (s *Store) AppendOutbox(ctx context.Context, lsn string, commitTime time.Ti
 	}
 	defer tx.Rollback(ctx)
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO conduit.outbox (lsn, commit_time, payload) VALUES ($1::pg_lsn, $2, $3)
-		 ON CONFLICT (lsn) DO NOTHING`, lsn, commitTime, payload); err != nil {
+		`INSERT INTO conduit.outbox (lsn, part, final, commit_time, payload) VALUES ($1::pg_lsn, $2, $3, $4, $5)
+		 ON CONFLICT (lsn, part) DO NOTHING`, lsn, part, final, commitTime, payload); err != nil {
 		return err
 	}
 	for _, ch := range changes {
@@ -201,10 +217,16 @@ func (s *Store) Janitor(ctx context.Context, ttl time.Duration) error {
 	return err
 }
 
-func (s *Store) ReadOutbox(ctx context.Context, afterSeq int64, limit int) ([]change.Tx, error) {
-	rows, err := s.pool.Query(ctx,
-		`SELECT seq, lsn::text, commit_time, payload FROM conduit.outbox
-		 WHERE seq > $1 ORDER BY seq LIMIT $2`, afterSeq, limit)
+// ReadOutbox returns up to limit transactions after afterSeq whose encoded
+// size adds up to at most maxBytes (always at least one).
+func (s *Store) ReadOutbox(ctx context.Context, afterSeq int64, limit, maxBytes int) ([]change.Tx, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT seq, lsn::text, commit_time, part, final, payload FROM (
+			SELECT o.*, sum(octet_length(payload::text)) OVER (ORDER BY seq) AS running,
+			       row_number() OVER (ORDER BY seq) AS n
+			FROM (SELECT * FROM conduit.outbox WHERE seq > $1 ORDER BY seq LIMIT $2) o) x
+		WHERE running <= $3 OR n = 1
+		ORDER BY seq`, afterSeq, limit, maxBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -213,9 +235,11 @@ func (s *Store) ReadOutbox(ctx context.Context, afterSeq int64, limit int) ([]ch
 	for rows.Next() {
 		var tx change.Tx
 		var payload []byte
-		if err := rows.Scan(&tx.Seq, &tx.LSN, &tx.CommitTime, &payload); err != nil {
+		var final bool
+		if err := rows.Scan(&tx.Seq, &tx.LSN, &tx.CommitTime, &tx.Part, &final, &payload); err != nil {
 			return nil, err
 		}
+		tx.Partial = !final
 		if err := json.Unmarshal(payload, &tx.Changes); err != nil {
 			return nil, fmt.Errorf("outbox seq %d: %w", tx.Seq, err)
 		}
@@ -252,6 +276,32 @@ func (s *Store) Trim(ctx context.Context, self string, retention time.Duration) 
 			WHERE m.status = 'active' AND m.id <> $1), 9223372036854775807)`,
 		self, retention.Seconds())
 	return err
+}
+
+// WALStatus tells how much WAL Postgres keeps for Conduit's slot. If
+// Conduit stops for long, this grows with every write until the disk fills,
+// unless max_slot_wal_keep_size caps it.
+type WALStatus struct {
+	RetainedBytes int64  `json:"retained_bytes"`
+	SlotStatus    string `json:"slot_status"`     // reserved | extended | unreserved | lost
+	KeepSizeLimit string `json:"keep_size_limit"` // max_slot_wal_keep_size, "-1" = no limit
+}
+
+func (s *Store) WALStatus(ctx context.Context, slot string) (WALStatus, error) {
+	var w WALStatus
+	err := s.pool.QueryRow(ctx, `
+		SELECT coalesce(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn), 0)::bigint,
+		       coalesce(wal_status, ''), current_setting('max_slot_wal_keep_size')
+		FROM pg_replication_slots WHERE slot_name = $1`, slot).Scan(&w.RetainedBytes, &w.SlotStatus, &w.KeepSizeLimit)
+	return w, err
+}
+
+// SkippedSchemaChanges counts changes waiting to be replayed after a schema fix.
+func (s *Store) SkippedSchemaChanges(ctx context.Context) (int64, error) {
+	var n int64
+	err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM conduit.conflicts WHERE kind = 'schema_mismatch' AND resolution = 'skipped'`).Scan(&n)
+	return n, err
 }
 
 type OutboxStats struct {

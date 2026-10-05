@@ -102,7 +102,7 @@ docker run -d --name conduit --restart unless-stopped -p 7420:7420 -p 7443:7443 
 |---|---|
 | Same LAN | Start it. Approve the join request (matching pairing code) on any running site's dashboard. |
 | Anywhere else | Click **＋ Add site** on a dashboard (or run `docker exec conduit conduit invite`) and give the code to the new site: `-e CONDUIT_JOIN=cdt1_…` or paste it on its dashboard. |
-| Existing Postgres without the right settings | Conduit sets them itself and asks you to **restart Postgres once**. |
+| Existing Postgres without the right settings | The dashboard asks first: click **Allow** (or set `CONDUIT_CONFIGURE_POSTGRES=true`), then **restart Postgres once**. |
 
 Everything else is automatic: site name, unique id range, table structure (if the database is empty),
 the initial copy of all data, and every other site learning about the new one.
@@ -122,12 +122,13 @@ All settings are environment variables; a YAML file (`/etc/conduit/conduit.yaml`
 | `CONDUIT_LISTEN` | `:7420` | Dashboard (LAN discovery uses UDP 7420) |
 | `CONDUIT_PEER_LISTEN` | `:7443` | HTTPS port for other sites |
 | `CONDUIT_DISCOVERY` | `true` | Find / announce on the LAN |
+| `CONDUIT_CONFIGURE_POSTGRES` | `false` | Let Conduit change Postgres settings without asking |
 
 More (owner-only tables, retention…) in [docs/configuration.md](docs/configuration.md).
 
 ## Requirements
 
-- PostgreSQL **16+** (`wal_level=logical`, `track_commit_timestamp=on` — Conduit sets these for you)
+- PostgreSQL **16+** (`wal_level=logical`, `track_commit_timestamp=on` — Conduit sets these for you once you allow it)
 - A superuser for Conduit
 - Every table needs a primary key; the schema must be the same on every site
   (new, empty sites get it copied automatically — needs `pg_dump`/`psql` 16, included in the Docker image)
@@ -147,7 +148,12 @@ More (owner-only tables, retention…) in [docs/configuration.md](docs/configura
   coordinated by Conduit — use a per-site prefix or make that table owner-only.
 - Last write wins per row: if two sites change different columns of the same row at the same time,
   the later change wins as a whole.
-- Conduit syncs rows, not DDL or `TRUNCATE`: change the schema on every site yourself.
+- Conduit syncs rows, not DDL or `TRUNCATE`: change the schema on every site yourself. If a table differs on
+  one site, changes for it are set aside (nothing else is held up); fix the table and click **Replay** on the dashboard.
+- While a site's Conduit is stopped, its Postgres keeps WAL for it (the dashboard warns above 1 GB).
+  Consider `max_slot_wal_keep_size`, and run `conduit cleanup --yes` on a database you stop syncing for good.
+- Very large transactions are fine (tested with 200,000 rows in one transaction) but take a while: roughly
+  2,000 rows per second.
 - Files your application stores outside the database are not synced.
 
 ## Support

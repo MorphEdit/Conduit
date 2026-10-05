@@ -175,7 +175,7 @@
   };
   const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
   const stateText = { ok: 'ซิงก์แล้ว', busy: 'มีคิวรอส่ง', warn: 'กำลัง retry', down: 'ออฟไลน์' };
-  const phaseText = { starting: 'กำลังเริ่ม', waiting_db: 'รอฐานข้อมูล', needs_restart: 'รอ restart Postgres', waiting_to_join: 'รอเข้าร่วม', joining: 'กำลังเข้าร่วม' };
+  const phaseText = { starting: 'กำลังเริ่ม', waiting_db: 'รอฐานข้อมูล', needs_config: 'รออนุญาตตั้งค่า Postgres', needs_restart: 'รอ restart Postgres', waiting_to_join: 'รอเข้าร่วม', joining: 'กำลังเข้าร่วม' };
 
   function render() {
     if (!mesh) return;
@@ -285,10 +285,15 @@
     const self = m.byId[m.self], st = self ? self.st : {};
     const running = !st.phase || st.phase === 'running';
     const banner = $('banner');
-    const msg = st.removed ? 'ไซต์นี้ถูกถอดออกจากเครือข่ายแล้ว — หยุดซิงก์' : st.warning || st.notice || (!running && st.error) || '';
+    const skipped = st.schema_skipped || 0;
+    const msg = st.removed ? 'ไซต์นี้ถูกถอดออกจากเครือข่ายแล้ว — หยุดซิงก์' :
+      st.warning || st.wal_warning || st.notice || (!running && st.error) ||
+      (skipped ? `ข้ามข้อมูลไป ${skipped} รายการเพราะโครงสร้างตารางของไซต์นี้ไม่ตรงกับไซต์อื่น — แก้ตารางให้ตรงกันแล้วกดลองใหม่ (ข้อมูลไม่หาย)` : '');
     banner.hidden = !msg || demo || st.phase === 'joining';
-    banner.textContent = msg;
-    banner.className = 'banner' + (!st.notice && !st.warning && st.error ? ' error' : '');
+    $('banner-text').textContent = msg;
+    banner.className = 'banner' + (!st.notice && !st.warning && !st.wal_warning && !skipped && st.error ? ' error' : '');
+    $('allow-pg').hidden = st.phase !== 'needs_config' || !st.admin_enabled;
+    $('replay').hidden = !skipped || !st.admin_enabled || !!(st.warning || st.wal_warning || st.notice);
 
     const joining = st.phase === 'waiting_to_join' || st.phase === 'joining';
     $('join-panel').hidden = !joining;
@@ -322,6 +327,17 @@
     if (a.dataset.approve && !confirm('รหัสจับคู่ตรงกับที่หน้าจอไซต์ใหม่แสดงใช่ไหม?')) return;
     try { await adminFetch(`v1/admin/requests/${id}/${a.dataset.approve ? 'approve' : 'reject'}`); tick(); }
     catch (err) { alert(err.message); }
+  });
+  $('allow-pg').addEventListener('click', async () => {
+    if (!confirm('Conduit จะตั้งค่า wal_level=logical และ track_commit_timestamp=on ให้ Postgres ของไซต์นี้\nจากนั้นต้อง restart Postgres หนึ่งครั้ง — ดำเนินการต่อไหม?')) return;
+    try { await adminFetch('v1/admin/configure-postgres'); tick(); } catch (err) { alert(err.message); }
+  });
+  $('replay').addEventListener('click', async () => {
+    try {
+      const r = await adminFetch('v1/admin/replay');
+      alert(`ใส่สำเร็จ ${r.replayed} รายการ` + (r.still_failing ? ` · ยังไม่เข้า ${r.still_failing} รายการ (โครงสร้างยังไม่ตรง)` : ''));
+      tick();
+    } catch (err) { alert(err.message); }
   });
   $('add-site').addEventListener('click', async () => {
     try {

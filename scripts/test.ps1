@@ -277,8 +277,14 @@ AssertSynced 'catch up after conduit-host restart'
 # ---------------------------------------------------------------------------
 Section "10. new site with nothing configured: auto Postgres setup, LAN discovery, approval"
 Compose up -d pg-branch conduit-branch 2>&1 | Out-Null
+$bs = WaitPhase branch 'needs_config'
+Check ($null -ne $bs) 'branch waits for permission before touching Postgres settings'
+$auto = docker compose --profile branch exec -T pg-branch sh -c 'cat "$PGDATA/postgresql.auto.conf"' | Out-String
+Check ($auto -notmatch 'wal_level') 'nothing was changed in Postgres without permission'
+Check ((Admin branch '/v1/admin/configure-postgres' 'wrong') -eq 401) 'permission needs the admin password'
+Check ((Admin branch '/v1/admin/configure-postgres') -eq 204) 'admin allowed the change'
 $bs = WaitPhase branch 'needs_restart'
-Check ($null -ne $bs -and $bs.notice -match 'restart') 'branch set wal_level/track_commit_timestamp itself and asks for one restart'
+Check ($null -ne $bs -and $bs.notice -match 'restart') 'branch set wal_level/track_commit_timestamp and asks for one restart'
 Compose restart pg-branch 2>&1 | Out-Null
 $bs = WaitPhase branch 'waiting_to_join'
 $deadline = (Get-Date).AddSeconds(60)

@@ -7,7 +7,7 @@ package cluster
 import (
 	"testing"
 
-	"github.com/conduit-sync/conduit/internal/peer"
+	"github.com/MorphEdit/conduit/internal/peer"
 )
 
 func TestGeneratedCertificateFingerprint(t *testing.T) {

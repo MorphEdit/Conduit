@@ -39,7 +39,12 @@ $bs = Status 7422
 if (-not $bs -or $bs.phase -ne 'running') {
     Write-Host "branch: starting with nothing configured ..."
     Up pg-branch, conduit-branch
-    for ($i = 0; $i -lt 60; $i++) { $bs = Status 7422; if ($bs -and $bs.phase -in 'needs_restart', 'waiting_to_join', 'running') { break }; Start-Sleep 1 }
+    for ($i = 0; $i -lt 60; $i++) { $bs = Status 7422; if ($bs -and $bs.phase -in 'needs_config', 'needs_restart', 'waiting_to_join', 'running') { break }; Start-Sleep 1 }
+    if ($bs.phase -eq 'needs_config') {
+        Write-Host "branch: allowing Conduit to change Postgres settings (admin) ..."
+        Invoke-RestMethod http://127.0.0.1:7422/v1/admin/configure-postgres -Method Post -Headers @{ 'X-Admin-Password' = $admin } | Out-Null
+        for ($i = 0; $i -lt 30; $i++) { $bs = Status 7422; if ($bs.phase -eq 'needs_restart') { break }; Start-Sleep 1 }
+    }
     if ($bs.phase -eq 'needs_restart') {
         Write-Host "branch: Conduit configured Postgres; restarting it once ..."
         docker compose --profile branch restart pg-branch 2>&1 | Out-Null

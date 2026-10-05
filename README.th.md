@@ -98,7 +98,7 @@ docker run -d --name conduit --restart unless-stopped -p 7420:7420 -p 7443:7443 
 |---|---|
 | วง LAN เดียวกัน | เปิดเครื่อง แล้วกดอนุมัติที่ dashboard ของไซต์เดิม (ดูว่ารหัสจับคู่ตรงกัน) |
 | ต่างสถานที่ | กด **＋ เพิ่มไซต์** บน dashboard (หรือ `docker exec conduit conduit invite`) แล้วเอารหัสไปใส่ที่ไซต์ใหม่: `-e CONDUIT_JOIN=cdt1_…` หรือแปะในหน้า dashboard ของมัน |
-| Postgres เดิมที่ยังตั้งค่าไม่ครบ | Conduit ตั้งค่าให้เอง แล้วขอให้คุณ **restart Postgres 1 ครั้ง** |
+| Postgres เดิมที่ยังตั้งค่าไม่ครบ | dashboard จะถามก่อน: กด **อนุญาตให้ตั้งค่า** (หรือตั้ง `CONDUIT_CONFIGURE_POSTGRES=true`) แล้ว **restart Postgres 1 ครั้ง** |
 
 ที่เหลือทำให้อัตโนมัติทั้งหมด: ตั้งชื่อไซต์, แจกช่วงเลข ID ที่ไม่ซ้ำ, สร้างตาราง (ถ้าฐานข้อมูลยังว่าง),
 คัดลอกข้อมูลทั้งหมดครั้งแรก และให้ทุกไซต์รู้จักไซต์ใหม่
@@ -118,12 +118,13 @@ docker run -d --name conduit --restart unless-stopped -p 7420:7420 -p 7443:7443 
 | `CONDUIT_LISTEN` | `:7420` | dashboard (ค้นหาใน LAN ใช้ UDP 7420) |
 | `CONDUIT_PEER_LISTEN` | `:7443` | พอร์ต HTTPS สำหรับไซต์อื่น |
 | `CONDUIT_DISCOVERY` | `true` | ค้นหาและประกาศตัวในวง LAN |
+| `CONDUIT_CONFIGURE_POSTGRES` | `false` | ให้ Conduit แก้ค่า Postgres ได้เองโดยไม่ต้องถาม |
 
 ค่าอื่นๆ (ตารางที่เขียนได้ไซต์เดียว, ระยะเวลาเก็บข้อมูล…) ดูที่ [docs/configuration.md](docs/configuration.md)
 
 ## สิ่งที่ต้องมี
 
-- PostgreSQL **16 ขึ้นไป** (`wal_level=logical`, `track_commit_timestamp=on` — Conduit ตั้งให้เอง)
+- PostgreSQL **16 ขึ้นไป** (`wal_level=logical`, `track_commit_timestamp=on` — Conduit ตั้งให้เมื่อคุณกดอนุญาต)
 - user ของ Postgres ที่เป็น superuser
 - ทุกตารางต้องมี primary key และโครงสร้างตารางต้องเหมือนกันทุกไซต์
   (ไซต์ใหม่ที่ฐานข้อมูลว่างจะได้รับการคัดลอกให้เอง ต้องใช้ `pg_dump`/`psql` 16 ซึ่งมีอยู่ใน Docker image แล้ว)
@@ -142,7 +143,11 @@ docker run -d --name conduit --restart unless-stopped -p 7420:7420 -p 7443:7443 
 - เลขเอกสารที่แอปออกเอง (ใบกำกับภาษี, PO, ตัวนับต่างๆ) Conduit ไม่ได้จัดการให้ ใช้ prefix แยกตามไซต์
   หรือตั้งตารางนั้นให้เขียนได้ไซต์เดียว
 - ถ้าสองไซต์แก้คนละคอลัมน์ของแถวเดียวกันในเวลาใกล้กัน การแก้ที่เกิดทีหลังจะชนะทั้งแถว
-- Conduit ซิงก์ข้อมูล แต่ไม่ซิงก์การแก้โครงสร้างตาราง (DDL) และ `TRUNCATE` ต้องแก้ทุกไซต์เอง
+- Conduit ซิงก์ข้อมูล แต่ไม่ซิงก์การแก้โครงสร้างตาราง (DDL) และ `TRUNCATE` ต้องแก้ทุกไซต์เอง ถ้าตารางไหนไม่ตรงกัน
+  ข้อมูลของตารางนั้นจะถูกพักไว้ (ตารางอื่นซิงก์ต่อได้ปกติ) แก้ตารางให้ตรงแล้วกด **ลองใส่ใหม่** บน dashboard ข้อมูลไม่หาย
+- ระหว่างที่ Conduit ของไซต์ไหนหยุด Postgres ของไซต์นั้นจะเก็บ WAL ไว้รอ (dashboard เตือนเมื่อเกิน 1 GB)
+  ควรตั้ง `max_slot_wal_keep_size` และถ้าเลิกซิงก์ฐานข้อมูลไหนถาวร ให้รัน `conduit cleanup --yes`
+- transaction ใหญ่มากใช้ได้ (ทดสอบแล้ว 200,000 แถวใน transaction เดียว) แต่ใช้เวลา ประมาณ 2,000 แถวต่อวินาที
 - ไฟล์ที่แอปเก็บไว้นอกฐานข้อมูลจะไม่ถูกซิงก์
 
 ## ติดต่อ

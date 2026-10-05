@@ -19,17 +19,18 @@ import (
 	"sync"
 	"time"
 
-	"github.com/conduit-sync/conduit/internal/change"
-	"github.com/conduit-sync/conduit/internal/config"
-	"github.com/conduit-sync/conduit/internal/peer"
-	"github.com/conduit-sync/conduit/internal/store"
+	"github.com/MorphEdit/conduit/internal/change"
+	"github.com/MorphEdit/conduit/internal/config"
+	"github.com/MorphEdit/conduit/internal/peer"
+	"github.com/MorphEdit/conduit/internal/store"
 )
 
 const (
 	batchSize    = 200
+	batchBytes   = 4 << 20 // stay well under the receiver's 64 MB request limit and our own memory
 	idlePoll     = 5 * time.Second
 	maxBackoff   = 30 * time.Second
-	requestLimit = 30 * time.Second
+	requestLimit = 2 * time.Minute
 )
 
 type Status struct {
@@ -102,7 +103,7 @@ func (s *Sender) Run(ctx context.Context) {
 	s.setAcked(cursor)
 
 	for ctx.Err() == nil {
-		txs, err := s.store.ReadOutbox(ctx, cursor, batchSize)
+		txs, err := s.store.ReadOutbox(ctx, cursor, batchSize, batchBytes)
 		if err != nil {
 			fail(err)
 			continue

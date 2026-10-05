@@ -19,7 +19,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/conduit-sync/conduit/internal/config"
+	"github.com/MorphEdit/conduit/internal/config"
 )
 
 // DefaultStep leaves room for 10 sites: site n generates ids ending in n.
@@ -131,31 +131,80 @@ func Authenticate(ctx context.Context, pool *pgxpool.Pool, id, secret string) er
 	return err
 }
 
-// UpsertMembers stores members, keeping whichever version is newer.
-// It reports whether anything changed.
+// UpsertMembers stores members as given (used for our own records).
 func UpsertMembers(ctx context.Context, pool *pgxpool.Pool, ms []Member) error {
-	_, err := mergeMembers(ctx, pool, ms)
+	for _, m := range ms {
+		if err := putMember(ctx, pool, m); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func putMember(ctx context.Context, pool *pgxpool.Pool, m Member) error {
+	_, err := pool.Exec(ctx, `
+		INSERT INTO conduit.members (id, url, id_offset, status, key_hash, cert_fp, joined_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (id) DO UPDATE SET url = EXCLUDED.url, id_offset = EXCLUDED.id_offset, status = EXCLUDED.status,
+			key_hash = EXCLUDED.key_hash, cert_fp = EXCLUDED.cert_fp,
+			joined_at = EXCLUDED.joined_at, updated_at = EXCLUDED.updated_at`,
+		m.ID, m.URL, m.Offset, m.Status, m.KeyHash, m.CertFP, m.JoinedAt, m.UpdatedAt)
 	return err
 }
 
-func mergeMembers(ctx context.Context, pool *pgxpool.Pool, ms []Member) (bool, error) {
+// decide applies the trust rules for a member record received from site
+// `from` (whose TLS certificate we pinned when we fetched it). It returns the
+// record to store, or false to ignore it.
+//
+//   - A site is the only authority on its own identity (URL, key hash,
+//     certificate): only a record served by that site itself may change them.
+//   - Other sites may only pass on that a member was removed.
+//   - Nobody may change this site's record except to mark it removed.
+//   - Records for sites we have never heard of are taken as they are (that is
+//     how new members spread from the site that admitted them, and how a
+//     joining site first learns its own record).
+func decide(local *Member, remote Member, self, from string) (Member, bool) {
+	if !config.ValidID(remote.ID) || (remote.Status != "active" && remote.Status != "removed") {
+		return Member{}, false
+	}
+	if local == nil {
+		// Includes our own record the first time we see it (when joining):
+		// there is nothing of ours yet to protect.
+		return remote, true
+	}
+	if !remote.UpdatedAt.After(local.UpdatedAt) {
+		return Member{}, false
+	}
+	if remote.ID == from && remote.ID != self {
+		return remote, true
+	}
+	if remote.Status == "removed" && local.Status == "active" {
+		out := *local
+		out.Status, out.UpdatedAt = "removed", remote.UpdatedAt
+		return out, true
+	}
+	return Member{}, false
+}
+
+func mergeMembers(ctx context.Context, pool *pgxpool.Pool, ms []Member, self, from string) (bool, error) {
+	known, err := Members(ctx, pool)
+	if err != nil {
+		return false, err
+	}
+	byID := map[string]*Member{}
+	for i := range known {
+		byID[known[i].ID] = &known[i]
+	}
 	changed := false
-	for _, m := range ms {
-		if !config.ValidID(m.ID) || (m.Status != "active" && m.Status != "removed") {
+	for _, remote := range ms {
+		rec, ok := decide(byID[remote.ID], remote, self, from)
+		if !ok {
 			continue
 		}
-		tag, err := pool.Exec(ctx, `
-			INSERT INTO conduit.members (id, url, id_offset, status, key_hash, cert_fp, joined_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-			ON CONFLICT (id) DO UPDATE SET url = EXCLUDED.url, id_offset = EXCLUDED.id_offset, status = EXCLUDED.status,
-				key_hash = EXCLUDED.key_hash, cert_fp = EXCLUDED.cert_fp,
-				joined_at = EXCLUDED.joined_at, updated_at = EXCLUDED.updated_at
-			WHERE conduit.members.updated_at < EXCLUDED.updated_at`,
-			m.ID, m.URL, m.Offset, m.Status, m.KeyHash, m.CertFP, m.JoinedAt, m.UpdatedAt)
-		if err != nil {
+		if err := putMember(ctx, pool, rec); err != nil {
 			return changed, err
 		}
-		changed = changed || tag.RowsAffected() > 0
+		changed = true
 	}
 	return changed, nil
 }
@@ -195,9 +244,10 @@ func mergeSettings(ctx context.Context, pool *pgxpool.Pool, ss []Setting) (bool,
 	return changed, nil
 }
 
-// Merge folds a remote view into ours and reports whether anything changed.
-func Merge(ctx context.Context, pool *pgxpool.Pool, v View) (bool, error) {
-	a, err := mergeMembers(ctx, pool, v.Members)
+// Merge folds a view served by site `from` into ours (see decide for the
+// trust rules) and reports whether anything changed.
+func Merge(ctx context.Context, pool *pgxpool.Pool, v View, self, from string) (bool, error) {
+	a, err := mergeMembers(ctx, pool, v.Members, self, from)
 	if err != nil {
 		return a, err
 	}
@@ -301,9 +351,12 @@ func Remove(ctx context.Context, pool *pgxpool.Pool, id string) error {
 	return err
 }
 
-// UpdateSelfURL refreshes our own member row when the advertised URL changes.
-func UpdateSelfURL(ctx context.Context, pool *pgxpool.Pool, id, url string) error {
-	_, err := pool.Exec(ctx,
-		`UPDATE conduit.members SET url = $2, updated_at = now() WHERE id = $1 AND url <> $2`, id, url)
+// UpdateSelf makes our own member row match reality (URL, key, certificate),
+// repairing it if it was ever damaged; the fresh timestamp spreads the fix.
+func UpdateSelf(ctx context.Context, pool *pgxpool.Pool, id, url, keyHash, certFP string) error {
+	_, err := pool.Exec(ctx, `
+		UPDATE conduit.members SET url = $2, key_hash = $3, cert_fp = $4, updated_at = now()
+		WHERE id = $1 AND status = 'active' AND (url <> $2 OR key_hash <> $3 OR cert_fp <> $4)`,
+		id, url, keyHash, certFP)
 	return err
 }

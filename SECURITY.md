@@ -21,6 +21,11 @@ Security fixes are released for the latest version. Please upgrade before report
 - Each site authenticates with its own secret; other sites only store its hash. Removing a site
   revokes it everywhere as soon as the news spreads (about 10 seconds).
 - A site can only deliver its own changes; it cannot pretend to be another site.
+- A site's address, key and certificate can only be changed by that site itself. Other sites may only pass on
+  that a member was removed, so one compromised site cannot redirect traffic meant for another.
+- LAN join requests are accepted only from private addresses, two pending per address.
+- Postgres passwords are passed to `pg_dump`/`psql` through the environment, never on the command line.
+- Conduit does not change Postgres settings unless an admin allows it (or `CONDUIT_CONFIGURE_POSTGRES=true`).
 - The dashboard (port 7420) is plain HTTP and meant for your LAN. Protect it with
   `CONDUIT_ADMIN_PASSWORD`, and put a TLS reverse proxy in front if you expose it further.
 - Invite codes are single-use and expire after 24 hours. Treat them like passwords.

@@ -19,11 +19,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/conduit-sync/conduit/internal/apply"
-	"github.com/conduit-sync/conduit/internal/cluster"
-	"github.com/conduit-sync/conduit/internal/peer"
-	"github.com/conduit-sync/conduit/internal/snapshot"
-	"github.com/conduit-sync/conduit/internal/store"
+	"github.com/MorphEdit/conduit/internal/apply"
+	"github.com/MorphEdit/conduit/internal/cluster"
+	"github.com/MorphEdit/conduit/internal/peer"
+	"github.com/MorphEdit/conduit/internal/pgcli"
+	"github.com/MorphEdit/conduit/internal/snapshot"
+	"github.com/MorphEdit/conduit/internal/store"
 )
 
 const peerTimeout = 15 * time.Second
@@ -195,7 +196,7 @@ func (r *Runtime) redeem(ctx context.Context, st *store.Store, code string) (*cl
 	r.Log.Info("admitted to cluster", "as", name, "detail", resp.String())
 
 	id := &cluster.Identity{ID: name, ClusterID: resp.ClusterID, Secret: secret, Offset: resp.Offset, Step: resp.Step}
-	if _, err := cluster.Merge(ctx, st.Pool(), resp.View); err != nil {
+	if _, err := cluster.Merge(ctx, st.Pool(), resp.View, name, resp.Seed); err != nil {
 		return nil, err
 	}
 	if err := cluster.SaveIdentity(ctx, st.Pool(), id); err != nil {
@@ -268,7 +269,9 @@ func (r *Runtime) copySchema(ctx context.Context, t peer.Target, creds peer.Cred
 	}
 	// The target already has "public"; make every CREATE SCHEMA a no-op if present.
 	ddl = createSchema.ReplaceAll(ddl, []byte("CREATE SCHEMA IF NOT EXISTS $1;"))
-	cmd := exec.CommandContext(ctx, "psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", "-d", r.Cfg.Database, "-f", "-")
+	dbname, env := pgcli.Conn(r.Cfg.Database) // password goes in the environment, not the process list
+	cmd := exec.CommandContext(ctx, "psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", "-d", dbname, "-f", "-")
+	cmd.Env = env
 	cmd.Stdin = bytes.NewReader(ddl)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("apply schema: %v: %s", err, bytes.TrimSpace(out))

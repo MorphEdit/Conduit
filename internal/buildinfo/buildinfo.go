@@ -4,7 +4,7 @@
 
 // Package buildinfo carries the version stamped in at build time:
 //
-//	go build -ldflags "-X github.com/conduit-sync/conduit/internal/buildinfo.Version=0.1.0 ..."
+//	go build -ldflags "-X github.com/MorphEdit/conduit/internal/buildinfo.Version=0.1.0 ..."
 package buildinfo
 
 var (

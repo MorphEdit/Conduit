@@ -12,22 +12,26 @@ import (
 	"embed"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net/http"
 	"sync"
 	"time"
 
-	"github.com/conduit-sync/conduit/internal/buildinfo"
-	"github.com/conduit-sync/conduit/internal/change"
-	"github.com/conduit-sync/conduit/internal/cluster"
-	"github.com/conduit-sync/conduit/internal/config"
-	"github.com/conduit-sync/conduit/internal/node"
-	"github.com/conduit-sync/conduit/internal/peer"
-	"github.com/conduit-sync/conduit/internal/snapshot"
+	"github.com/MorphEdit/conduit/internal/buildinfo"
+	"github.com/MorphEdit/conduit/internal/change"
+	"github.com/MorphEdit/conduit/internal/cluster"
+	"github.com/MorphEdit/conduit/internal/config"
+	"github.com/MorphEdit/conduit/internal/node"
+	"github.com/MorphEdit/conduit/internal/peer"
+	"github.com/MorphEdit/conduit/internal/snapshot"
 )
 
 const maxBody = 64 << 20
+
+// walWarnBytes: warn on the dashboard when the slot holds back this much WAL.
+const walWarnBytes = 1 << 30
 
 // The dashboard served at "/".
 //
@@ -78,6 +82,8 @@ func (s *Server) DashboardHandler() http.Handler {
 	mux.HandleFunc("POST /v1/admin/requests/{id}/{decision}", s.admin(s.decide))
 	mux.HandleFunc("POST /v1/admin/members/{id}/remove", s.admin(s.removeMember))
 	mux.HandleFunc("POST /v1/admin/join", s.admin(s.pasteInvite))
+	mux.HandleFunc("POST /v1/admin/replay", s.admin(s.replay))
+	mux.HandleFunc("POST /v1/admin/configure-postgres", s.admin(s.configurePostgres))
 
 	ui, _ := fs.Sub(uiFiles, "ui")
 	mux.Handle("GET /", http.FileServerFS(ui))
@@ -150,7 +156,11 @@ func (s *Server) apply(w http.ResponseWriter, r *http.Request, caller string) {
 		http.Error(w, "origin does not match the authenticated site", http.StatusForbidden)
 		return
 	}
-	ack := v.Applier.Apply(r.Context(), b)
+	// Finish applying even if the sender gives up waiting: the work is kept
+	// (applied_seq) and its retry simply skips what is already done.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), time.Hour)
+	defer cancel()
+	ack := v.Applier.Apply(ctx, b)
 	if ack.Error != "" {
 		s.log.Warn("apply failed", "origin", b.Origin, "applied", ack.Applied, "err", ack.Error)
 	}
@@ -248,6 +258,16 @@ func (s *Server) statusData(ctx context.Context) map[string]any {
 		}
 	}
 	out["owners"] = owners
+	if wal, err := v.Store.WALStatus(ctx, s.cfg.Capture.Slot); err == nil {
+		out["wal"] = wal
+		if wal.RetainedBytes > walWarnBytes || wal.SlotStatus == "unreserved" || wal.SlotStatus == "lost" {
+			out["wal_warning"] = fmt.Sprintf("Postgres เก็บ WAL ค้างไว้ให้ Conduit %.1f GB (สถานะ %s) — ถ้าปล่อยไว้ดิสก์อาจเต็ม: ตรวจว่าทุกไซต์ซิงก์ได้ และพิจารณาตั้ง max_slot_wal_keep_size",
+				float64(wal.RetainedBytes)/1e9, wal.SlotStatus)
+		}
+	}
+	if n, err := v.Store.SkippedSchemaChanges(ctx); err == nil && n > 0 {
+		out["schema_skipped"] = n
+	}
 	out["join_requests"] = s.rt.Requests.Pending()
 	return out
 }
