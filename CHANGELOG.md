@@ -16,6 +16,9 @@
 - A table that differs on one site no longer blocks the queue: changes are set aside and can be replayed
 - Module path is now github.com/MorphEdit/conduit; image exposes 7420/tcp, 7420/udp and 7443/tcp
 - More unit tests; `scripts/stress.py` measures throughput, latency and every failure case
+- Tables without a primary key get REPLICA IDENTITY FULL automatically, so installing Conduit never breaks the
+  app's UPDATE/DELETE on them; rows are matched NULL-safely
+- Id alignment and owner guards also work when an app uses an ordinary (non-superuser) role
 
 ## v0.1.0 — first public release
 

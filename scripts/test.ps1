@@ -14,6 +14,7 @@ $OutputEncoding = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 
 $tables = @('customers', 'quotations', 'quotation_items', 'stock_lots')
+$nopk = 'nopk_log'
 $ports = @{ host = 7420; local = 7421; branch = 7422 }
 $adminPw = if ($env:CONDUIT_ADMIN_PASSWORD) { $env:CONDUIT_ADMIN_PASSWORD } else { 'admin' }
 $peerPorts = @{ host = 7440; local = 7441; branch = 7442 }
@@ -373,6 +374,15 @@ Check ($inc -eq '10') "table created by an app role gets per-site ids at once (i
 Check ((Sql host "SET ROLE app_user; SELECT has_table_privilege('conduit.node', 'SELECT')") -match 'f') 'app role cannot read Conduit secrets'
 $guard = try { Sql local "SET ROLE app_user; INSERT INTO stock_lots (sku, qty) VALUES ('X', 1);"; '' } catch { "$_" }
 Check ($guard -match 'owned by node "host"') 'owner-only guard gives its real message to an app role'
+
+Section "15. table without a primary key"
+foreach ($n in 'host', 'local') { Sql $n "CREATE TABLE nopk_log (at TIMESTAMPTZ, msg TEXT, who TEXT)" | Out-Null }
+Start-Sleep 3
+$err = try { Sql host "INSERT INTO nopk_log VALUES ('2026-01-01 10:00+07', 'login', NULL), ('2026-01-01 10:01+07', 'login', NULL), ('2026-01-01 10:02+07', 'view', 'som'); UPDATE nopk_log SET who = 'ann' WHERE msg = 'view'; DELETE FROM nopk_log WHERE at = '2026-01-01 10:00+07';" | Out-Null; '' } catch { "$_" }
+Check ($err -eq '') "the app can still UPDATE and DELETE a table without a primary key $err"
+$script:nodes = @('host', 'local')
+$tables += $nopk
+AssertSynced 'table without a primary key syncs (rows with NULLs included)'
 
 # ---------------------------------------------------------------------------
 Write-Host ""

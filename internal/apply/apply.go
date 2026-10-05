@@ -522,6 +522,12 @@ func ident(s string) string { return pgx.Identifier{s}.Sanitize() }
 func where(a *args, keys []change.Column) string {
 	parts := make([]string, len(keys))
 	for i, k := range keys {
+		if k.Value == nil {
+			// Tables without a primary key are matched on every column, and
+			// "= NULL" never matches.
+			parts[i] = ident(k.Name) + " IS NULL"
+			continue
+		}
 		parts[i] = ident(k.Name) + " = " + a.add(k)
 	}
 	return strings.Join(parts, " AND ")

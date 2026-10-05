@@ -87,6 +87,7 @@ var alignSQL = []string{
 	`CREATE OR REPLACE FUNCTION conduit.align_on_ddl() RETURNS event_trigger LANGUAGE plpgsql AS $fn$
 	BEGIN
 		IF coalesce(current_setting('conduit.aligning', true), '') = 'on' THEN RETURN; END IF;
+		PERFORM conduit.prepare_tables();
 		PERFORM conduit.align_sequences();
 	EXCEPTION WHEN OTHERS THEN
 		RAISE WARNING 'conduit: could not align id sequences: %', SQLERRM;
@@ -95,7 +96,30 @@ var alignSQL = []string{
 	// trigger and owner guards run as the user doing the DDL / write);
 	// Conduit's tables stay private.
 	`GRANT USAGE ON SCHEMA conduit TO PUBLIC`,
-	`GRANT EXECUTE ON FUNCTION conduit.align_sequences(), conduit.align_on_ddl(), conduit.owner_guard() TO PUBLIC`,
+	// Postgres refuses UPDATE/DELETE on a published table that has no
+	// replica identity, which would break the app the moment Conduit is
+	// installed. Tables without a primary key are switched to REPLICA
+	// IDENTITY FULL (rows are then matched on all columns).
+	`CREATE OR REPLACE FUNCTION conduit.prepare_tables() RETURNS integer LANGUAGE plpgsql
+	SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+	DECLARE r record; v_schemas text[]; v_done integer := 0;
+	BEGIN
+		SELECT schemas INTO v_schemas FROM conduit.node;
+		IF NOT FOUND THEN v_schemas := '{public}'; END IF;
+		PERFORM set_config('conduit.aligning', 'on', true);
+		FOR r IN
+			SELECT n.nspname AS sch, c.relname AS tbl
+			FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+			WHERE c.relkind IN ('r', 'p') AND n.nspname = ANY (v_schemas) AND c.relreplident = 'd'
+			  AND NOT EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid AND i.indisprimary)
+		LOOP
+			EXECUTE format('ALTER TABLE %I.%I REPLICA IDENTITY FULL', r.sch, r.tbl);
+			v_done := v_done + 1;
+		END LOOP;
+		PERFORM set_config('conduit.aligning', '', true);
+		RETURN v_done;
+	END $fn$`,
+	`GRANT EXECUTE ON FUNCTION conduit.align_sequences(), conduit.prepare_tables(), conduit.align_on_ddl(), conduit.owner_guard() TO PUBLIC`,
 	`DO $do$ BEGIN
 		IF NOT EXISTS (SELECT 1 FROM pg_event_trigger WHERE evtname = 'conduit_align_ids') THEN
 			CREATE EVENT TRIGGER conduit_align_ids ON ddl_command_end
@@ -114,6 +138,13 @@ func alignSequences(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config,
 	}
 	if _, err := pool.Exec(ctx, `UPDATE conduit.node SET schemas = $1`, cfg.Capture.Schemas); err != nil {
 		return err
+	}
+	var full int
+	if err := pool.QueryRow(ctx, `SELECT conduit.prepare_tables()`).Scan(&full); err != nil {
+		return err
+	}
+	if full > 0 {
+		log.Info("tables without a primary key set to REPLICA IDENTITY FULL so updates and deletes keep working", "count", full)
 	}
 	var n int
 	if err := pool.QueryRow(ctx, `SELECT conduit.align_sequences()`).Scan(&n); err != nil {

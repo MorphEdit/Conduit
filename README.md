@@ -144,8 +144,11 @@ More (owner-only tables, retention…) in [docs/configuration.md](docs/configura
 
 ## Good to know
 
-- Business numbers your application generates itself (invoice / PO numbers, custom counters) are not
-  coordinated by Conduit — use a per-site prefix or make that table owner-only.
+- Business numbers your application generates itself (invoice / PO numbers, custom counters, sequences used
+  with `nextval()` that are not a column's default) are not coordinated by Conduit — use a per-site prefix or make
+  that table owner-only.
+- Tables without a primary key are switched to `REPLICA IDENTITY FULL` (otherwise Postgres would refuse the
+  app's UPDATE/DELETE on them) and are matched on all columns; give tables a primary key where you can.
 - Last write wins per row: if two sites change different columns of the same row at the same time,
   the later change wins as a whole.
 - Conduit syncs rows, not DDL or `TRUNCATE`: change the schema on every site yourself. If a table differs on
