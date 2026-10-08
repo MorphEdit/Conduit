@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -196,6 +197,28 @@ func (s *Store) AppendOutbox(ctx context.Context, lsn string, part int, final bo
 // Execer is satisfied by pgx pools, connections and transactions.
 type Execer interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// Tombstone marks a row deleted at At (pk is the row's KeyJSON).
+type Tombstone struct {
+	Schema string    `json:"schema"`
+	Table  string    `json:"table"`
+	PK     string    `json:"pk"`
+	At     time.Time `json:"at"`
+}
+
+// Tombstones returns every delete marker, as seen by q (e.g. a snapshot transaction).
+func Tombstones(ctx context.Context, q interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}) ([]Tombstone, error) {
+	rows, err := q.Query(ctx, `SELECT schema_name, table_name, pk, deleted_at FROM conduit.tombstones ORDER BY 1, 2, 3`)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (Tombstone, error) {
+		var t Tombstone
+		return t, r.Scan(&t.Schema, &t.Table, &t.PK, &t.At)
+	})
 }
 
 func AddTombstone(ctx context.Context, db Execer, schema, table, pk string, at time.Time) error {

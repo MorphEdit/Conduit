@@ -59,6 +59,16 @@ func TestDecideTrustRules(t *testing.T) {
 
 func ptr(m Member) *Member { return &m }
 
+func TestSiteCannotChangeItsOwnIDSlot(t *testing.T) {
+	local := member("host", "https://host:7443", "aaa", "active", t0)
+	remote := member("host", "https://host2:7443", "aaa", "active", t0.Add(time.Hour))
+	remote.Offset = 7 // would collide with another site's ids
+	got, ok := decide(&local, remote, "branch", "host")
+	if !ok || got.URL != "https://host2:7443" || got.Offset != 1 {
+		t.Fatalf("got ok=%v url=%s offset=%d; want the new URL with the original slot 1", ok, got.URL, got.Offset)
+	}
+}
+
 func TestJoinRequestLimits(t *testing.T) {
 	r := NewRequests()
 	secret := "0123456789abcdef"

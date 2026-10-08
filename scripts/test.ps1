@@ -56,6 +56,7 @@ function WaitHealthy([string]$node) {
 }
 
 function Status([string]$node) { Invoke-RestMethod "http://127.0.0.1:$($ports[$node])/status" -TimeoutSec 5 }
+function StatusAdmin([string]$node) { Invoke-RestMethod "http://127.0.0.1:$($ports[$node])/status" -TimeoutSec 5 -Headers @{ 'X-Admin-Password' = $adminPw } }
 
 function AssertSynced([string]$name, [int]$timeoutSec = 90) {
     $deadline = (Get-Date).AddSeconds($timeoutSec)
@@ -290,12 +291,26 @@ Compose restart pg-branch 2>&1 | Out-Null
 $bs = WaitPhase branch 'waiting_to_join'
 $deadline = (Get-Date).AddSeconds(60)
 while ((Get-Date) -lt $deadline -and ((Status branch).pairing.status -ne 'requested')) { Start-Sleep 1 }
-$pair = (Status branch).pairing
-Check ($pair.status -eq 'requested' -and $pair.seed_id -eq 'host') "branch found host on the LAN and asked to join (code $($pair.code))"
+$pair = (StatusAdmin branch).pairing
+Check ($pair.status -eq 'requested' -and $pair.seed_id -eq 'host' -and $pair.code.Length -eq 7) "branch found host on the LAN and asked to join (code $($pair.code))"
+$anon = (Status branch).pairing
+Check ($anon.hidden -eq $true -and -not $anon.code) 'pairing code is hidden from viewers without the admin password'
 $req = (Status host).join_requests | Where-Object node_id -eq 'branch' | Select-Object -First 1
-Check ($null -ne $req -and $req.code -eq $pair.code) 'host dashboard shows the same pairing code'
-Check ((Admin host "/v1/admin/requests/$($req.id)/approve" 'wrong') -eq 401) 'approval needs the admin password'
-Check ((Admin host "/v1/admin/requests/$($req.id)/approve") -eq 204) 'admin approved branch'
+Check ($null -ne $req -and -not $req.code) 'the pairing code never leaves branch (host only sees the request)'
+Check ((Admin host "/v1/admin/requests/$($req.id)/approve" 'wrong' @{ code = $pair.code }) -eq 401) 'approval needs the admin password'
+Check ((Admin host "/v1/admin/requests/$($req.id)/approve" $adminPw @{ code = '12' }) -eq 400) 'approval needs a 6-digit code'
+# An approval made without knowing the code (a mistake, or a fake site on the LAN) is ignored by branch.
+$wrong = if (($pair.code -replace ' ', '') -eq '000000') { '000001' } else { '000000' }
+Check ((Admin host "/v1/admin/requests/$($req.id)/approve" $adminPw @{ code = $wrong }) -eq 204) 'host sent an approval with the wrong code'
+$deadline = (Get-Date).AddSeconds(30)
+while ((Get-Date) -lt $deadline -and ((StatusAdmin branch).pairing.status -ne 'bad_proof')) { Start-Sleep 1 }
+$bad = (StatusAdmin branch).pairing
+Check ($bad.status -eq 'bad_proof' -and $bad.code -ne $pair.code -and (Status branch).phase -eq 'waiting_to_join') 'branch refused the unproven approval and made a new code'
+$deadline = (Get-Date).AddSeconds(60)
+while ((Get-Date) -lt $deadline -and ((StatusAdmin branch).pairing.status -ne 'requested')) { Start-Sleep 1 }
+$pair = (StatusAdmin branch).pairing
+$req = (Status host).join_requests | Where-Object node_id -eq 'branch' | Select-Object -First 1
+Check ((Admin host "/v1/admin/requests/$($req.id)/approve" $adminPw @{ code = $pair.code }) -eq 204) 'admin approved branch with the code shown on branch'
 $bs = WaitPhase branch 'running'
 Check ($null -ne $bs -and $bs.sequences.offset -eq 3) 'branch joined (id slot 3), tables and data copied'
 $script:nodes = @('host', 'local', 'branch')
@@ -314,6 +329,19 @@ $spurious = Sql branch "SELECT count(*) FROM conduit.conflicts"
 Check ($spurious -eq '0') "no spurious conflicts on the new site ($spurious)"
 
 # ---------------------------------------------------------------------------
+Section "10b. id slots always come from one site (no duplicates when two sites admit)"
+Check ((Admin local '/v1/admin/invites') -eq 200) 'local (not the founder) created an invite'
+$inv = ($script:lastBody | ConvertFrom-Json).code.Substring(5).Replace('-', '+').Replace('_', '/'); while ($inv.Length % 4) { $inv += '=' }
+$secret = ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($inv)) | ConvertFrom-Json).s
+$code = PeerCall local POST '/v1/join' '' @{ secret = $secret; id = 'ghost'; url = 'https://ghost:7443'; key_hash = 'k'; cert_fp = ('0' * 64) }
+$slot = if ($code -eq 200) { ($script:peerBody | ConvertFrom-Json).offset } else { 0 }
+Check ($code -eq 200 -and $slot -eq 4) "local admitted a site with a slot assigned by host ($code, slot $slot)"
+Check ((Sql host "SELECT id_offset FROM conduit.members WHERE id = 'ghost'") -eq '4') 'host recorded the slot it handed out at once (before any gossip)'
+Check ((PeerCall local POST '/v1/allocate' (Creds host) @{ id = 'ghost2'; url = 'https://g'; key_hash = 'k'; cert_fp = 'f' }) -eq 409) 'only the allocator (host) hands out slots'
+Check ((Admin host '/v1/admin/members/ghost/remove') -eq 204) 'removed the test site again'
+Start-Sleep 12 # let the removal reach every site
+
+# ---------------------------------------------------------------------------
 Section "11. security: TLS + per-site credentials"
 $code = PeerCall local GET '/health' -Plain
 Check ($code -ne 200) "peer port refuses plain HTTP ($code)"
@@ -329,6 +357,14 @@ Check ($code -eq 200 -and $ack.applied -eq $before -and (Sql local "SELECT count
 Check ((PeerCall local POST '/v1/apply' 'Conduit host:wrong-secret' $batch) -eq 401) 'wrong secret rejected'
 Check ((PeerCall local POST '/v1/apply' 'Bearer anything' $batch) -eq 401) 'old shared-token style rejected'
 Check ((PeerCall host POST '/v1/apply' $localAuth $batch) -eq 403) 'a site cannot send changes pretending to be another site'
+# A member site may only write the synced schemas, never Conduit's own tables or the catalogs.
+# (Sent as branch with a far-ahead seq: branch writes nothing more before it is removed.)
+$evil = @{ origin = 'branch'; txs = @(@{ seq = 1000000; lsn = '0/1'; commit_time = (Get-Date).ToString('o'); changes = @(
+    @{ op = 'I'; s = 'conduit'; t = 'members'; new = @(@{ n = 'id'; k = $true; v = 'evil' }, @{ n = 'url'; v = 'https://evil' }, @{ n = 'id_offset'; v = '9' }) },
+    @{ op = 'U'; s = 'pg_catalog'; t = 'pg_authid'; new = @(@{ n = 'oid'; k = $true; v = '10' }, @{ n = 'rolpassword'; v = 'x' }) }) }) }
+$code = PeerCall local POST '/v1/apply' (Creds branch) $evil
+Check ($code -eq 200 -and (Sql local "SELECT count(*) FROM conduit.members WHERE id = 'evil'") -eq '0') 'a member cannot write Conduit''s own tables on another site'
+Check ((ConflictCount local 'schema_not_synced') -eq 2) 'both forbidden changes were set aside and logged'
 Check ((PeerCall local GET '/v1/snapshot') -eq 401) 'snapshot needs credentials'
 Check ((PeerCall local GET '/v1/members') -eq 401) 'member list needs credentials'
 Check ((PeerCall host GET '/v1/members' $localAuth) -eq 200) 'active member can read the member list'

@@ -42,14 +42,15 @@
     <div>
       <p class="eyebrow">ไซต์นี้ยังไม่ได้เข้าร่วม</p>
       <h2 id="join-title">กำลังค้นหาไซต์อื่นในวง LAN…</h2>
-      <p class="join-help" id="join-help">เปิด dashboard ของไซต์ที่ทำงานอยู่ แล้วกดอนุมัติคำขอที่มีรหัสตรงกับด้านขวา</p>
+      <p class="join-help" id="join-help">เปิด dashboard ของไซต์ที่ทำงานอยู่ กดอนุมัติคำขอ แล้วพิมพ์รหัสจับคู่ด้านขวา (อย่าบอกรหัสนี้กับใครนอกจากคนที่กดอนุมัติ)</p>
       <form class="paste" id="paste-form">
         <label for="paste-input">หรือแปะรหัสเชิญ</label>
         <div><input id="paste-input" placeholder="cdt1_…" autocomplete="off" spellcheck="false"><button type="submit">เข้าร่วม</button></div>
         <span class="form-msg" id="paste-msg"></span>
       </form>
     </div>
-    <div class="pair-code"><span>รหัสจับคู่</span><strong id="pair-code">— — —</strong></div>
+    <div class="pair-code"><span>รหัสจับคู่</span><strong id="pair-code">— — —</strong>
+      <button class="ghost" id="show-code" type="button" hidden>แสดงรหัส (ใช้รหัส admin)</button></div>
   </section>
 
   <section class="experience" aria-label="ผังการเชื่อมต่อของทุกไซต์">

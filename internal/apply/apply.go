@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -251,11 +252,28 @@ const (
 	// KindSchema marks changes skipped because the local table differs.
 	KindSchema = "schema_mismatch"
 	kindOwner  = "owner_violation"
+	// kindNotSynced marks changes for a schema this site does not sync.
+	kindNotSynced = "schema_not_synced"
 )
+
+// Syncable reports whether changes to tables in schema may be written here:
+// only the schemas this site syncs, never Conduit's own state or the system
+// catalogs. The apply connection is a superuser with triggers off, so without
+// this check one member site could rewrite any table on every other site.
+func (a *Applier) Syncable(schema string) bool {
+	if schema == "conduit" || schema == "information_schema" || strings.HasPrefix(schema, "pg_") {
+		return false
+	}
+	return slices.Contains(a.cfg.Capture.Schemas, schema)
+}
 
 // applyChange runs one change inside a savepoint so a unique violation on
 // one row is recorded as a conflict instead of blocking the whole queue.
 func (a *Applier) applyChange(ctx context.Context, tx pgx.Tx, r *row) error {
+	if !a.Syncable(r.ch.Schema) {
+		return a.conflict(ctx, tx, r, kindNotSynced, "skipped",
+			fmt.Sprintf("schema %q is not synced on this site", r.ch.Schema))
+	}
 	if owner := a.cfg.Owner(r.ch.Schema, r.ch.Table); owner != "" && owner != r.origin {
 		return a.conflict(ctx, tx, r, kindOwner, "skipped",
 			fmt.Sprintf("table is owned by %q but change came from %q", owner, r.origin))
@@ -339,6 +357,10 @@ func (a *Applier) ReplaySkipped(ctx context.Context) (replayed, failed int, err 
 	}
 	rows.Close()
 	for _, s := range list {
+		if !a.Syncable(s.ch.Schema) {
+			failed++
+			continue
+		}
 		if err := a.ensure(ctx, s.origin); err != nil {
 			return replayed, failed, err
 		}
@@ -348,7 +370,11 @@ func (a *Applier) ReplaySkipped(ctx context.Context) (replayed, failed int, err 
 		}
 		r := &row{origin: s.origin, at: s.at, ch: s.ch}
 		var pgErr *pgconn.PgError
-		sp, _ := tx.Begin(ctx)
+		sp, err := tx.Begin(ctx)
+		if err != nil {
+			tx.Rollback(ctx)
+			return replayed, failed, err
+		}
 		switch s.ch.Op {
 		case "I", "U":
 			err = a.upsert(ctx, sp, tx, r)
@@ -598,6 +624,9 @@ func (a *Applier) ApplyBaseline(ctx context.Context, origin string, at time.Time
 		names := make([]string, len(truncate))
 		for i, t := range truncate {
 			schema, table, _ := strings.Cut(t, ".")
+			if !a.Syncable(schema) {
+				return fmt.Errorf("snapshot table %s is not in a synced schema", t)
+			}
 			names[i] = pgx.Identifier{schema, table}.Sanitize()
 		}
 		if _, err := tx.Exec(ctx, "TRUNCATE "+strings.Join(names, ", ")); err != nil {
@@ -605,6 +634,9 @@ func (a *Applier) ApplyBaseline(ctx context.Context, origin string, at time.Time
 		}
 	}
 	for _, ch := range rows {
+		if !a.Syncable(ch.Schema) {
+			return fmt.Errorf("snapshot row for %s.%s is not in a synced schema", ch.Schema, ch.Table)
+		}
 		r := &row{origin: origin, at: at, ch: ch}
 		var ar args
 		var names, vals, keys, sets []string
@@ -628,6 +660,31 @@ func (a *Applier) ApplyBaseline(ctx context.Context, origin string, at time.Time
 		}
 		if _, err := ar.exec(ctx, tx, sql); err != nil {
 			return fmt.Errorf("%s: %w", r.table(), err)
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+// ApplyTombstones stores the source site's delete markers during a snapshot,
+// so an old update that arrives later cannot bring a deleted row back here.
+func (a *Applier) ApplyTombstones(ctx context.Context, origin string, ts []store.Tombstone) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := a.ensure(ctx, origin); err != nil {
+		a.reset()
+		return err
+	}
+	tx, err := a.conn.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	for _, t := range ts {
+		if !a.Syncable(t.Schema) {
+			continue
+		}
+		if err := store.AddTombstone(ctx, tx, t.Schema, t.Table, t.PK, t.At); err != nil {
+			return err
 		}
 	}
 	return tx.Commit(ctx)

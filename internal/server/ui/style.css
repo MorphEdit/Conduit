@@ -45,6 +45,7 @@ h1>span{color:var(--mint)}
 .join-help{margin:8px 0 0;color:var(--muted);font-size:14px;line-height:1.6;max-width:560px}
 .pair-code{text-align:center;min-width:180px}
 .pair-code span{display:block;font-size:12px;letter-spacing:2px;color:var(--muted)}
+.pair-code button{margin-top:10px}
 .pair-code strong{display:block;margin-top:6px;font-size:34px;font-weight:600;letter-spacing:4px;color:var(--mint);font-variant-numeric:tabular-nums}
 .paste{margin-top:18px}
 .paste label{display:block;font-size:12px;color:var(--muted);margin-bottom:6px}

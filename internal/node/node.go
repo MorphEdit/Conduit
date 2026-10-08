@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math/big"
 	"net/http"
 	"sync"
@@ -44,9 +45,12 @@ const (
 
 // Pairing is what a site waiting to join shows on its own dashboard.
 type Pairing struct {
-	Code   string `json:"code"`              // compare with the code on the approving site
+	// Code never leaves this site: the admin types it on the approving site,
+	// which proves the approval with it (see cluster.PairingProof).
+	Code   string `json:"code"`
+	Hidden bool   `json:"hidden,omitempty"`  // Code withheld: the viewer is not an admin
 	SeedID string `json:"seed_id,omitempty"` // site the request went to
-	Status string `json:"status"`            // searching | requested | rejected
+	Status string `json:"status"`            // searching | requested | rejected | bad_proof
 }
 
 // Runtime is the live state shared with the HTTP server.
@@ -215,10 +219,18 @@ func (r *Runtime) start(ctx context.Context, st *store.Store, id *cluster.Identi
 		return err
 	}
 	// Table policies: a site whose own config lists them publishes them to
-	// the cluster; everyone else adopts the cluster's.
-	if len(cfg.TablesCopy()) > 0 {
-		if err := cluster.PutSetting(ctx, pool, "tables", cfg.TablesCopy()); err != nil {
+	// the cluster; everyone else adopts the cluster's. They are published
+	// only when they differ, so a restart with unchanged config does not
+	// re-stamp them and win over a change made meanwhile on another site.
+	if mine := cfg.TablesCopy(); len(mine) > 0 {
+		cur, ok, err := cluster.TablesSetting(ctx, pool)
+		if err != nil {
 			return err
+		}
+		if !ok || !maps.Equal(cur, mine) {
+			if err := cluster.PutSetting(ctx, pool, "tables", mine); err != nil {
+				return err
+			}
 		}
 	}
 	applySettings := func(ctx context.Context) {

@@ -16,6 +16,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -61,6 +62,7 @@ func (s *Server) PeerHandler() http.Handler {
 	mux.HandleFunc("GET /v1/snapshot", s.peerOnly(s.snapshot))
 	mux.HandleFunc("GET /v1/members", s.peerOnly(s.members))
 	mux.HandleFunc("GET /v1/schema", s.peerOnly(s.schema))
+	mux.HandleFunc("POST /v1/allocate", s.peerOnly(s.allocate))
 
 	// New sites asking to join (invite secret / request secret).
 	mux.HandleFunc("POST /v1/join", s.join)
@@ -118,6 +120,12 @@ func (s *Server) peerOnly(h func(http.ResponseWriter, *http.Request, string)) ht
 	}
 }
 
+// isAdmin reports whether r may see admin-only status details: it carries the
+// admin password, or this site has none set.
+func (s *Server) isAdmin(r *http.Request) bool {
+	return s.cfg.AdminPassword == "" || equal(r.Header.Get("X-Admin-Password"), s.cfg.AdminPassword)
+}
+
 func (s *Server) admin(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.cfg.AdminPassword == "" {
@@ -170,7 +178,8 @@ func (s *Server) apply(w http.ResponseWriter, r *http.Request, caller string) {
 func (s *Server) snapshot(w http.ResponseWriter, r *http.Request, _ string) {
 	v := s.rt.View()
 	s.log.Info("serving snapshot", "remote", r.RemoteAddr)
-	if err := snapshot.Serve(r.Context(), w, v.Store.Pool(), s.cfg); err != nil {
+	ver, _ := strconv.Atoi(r.URL.Query().Get("v"))
+	if err := snapshot.Serve(r.Context(), w, v.Store.Pool(), s.cfg, ver >= 2); err != nil {
 		// Headers may already be sent; the client detects the missing "end" line.
 		s.log.Warn("snapshot failed", "err", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -190,10 +199,13 @@ func (s *Server) members(w http.ResponseWriter, r *http.Request, _ string) {
 // ---------- status & dashboard data ----------
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, s.statusData(r.Context()))
+	writeJSON(w, s.statusData(r.Context(), s.isAdmin(r)))
 }
 
-func (s *Server) statusData(ctx context.Context) map[string]any {
+// statusData describes this site. The pairing code is only included for an
+// admin: it is what proves an approval came from the intended site, so
+// anyone who can read it could approve a fake one.
+func (s *Server) statusData(ctx context.Context, admin bool) map[string]any {
 	v := s.rt.View()
 	out := map[string]any{
 		"node_id": s.cfg.NodeID, "time": time.Now(), "phase": v.Phase, "advertise": s.cfg.Advertise,
@@ -206,6 +218,9 @@ func (s *Server) statusData(ctx context.Context) map[string]any {
 		out["error"] = v.Error
 	}
 	if v.Pairing != nil {
+		if !admin {
+			v.Pairing.Code, v.Pairing.Hidden = "", true
+		}
 		out["pairing"] = v.Pairing
 	}
 	if v.TLS != nil {
@@ -284,7 +299,7 @@ type meshNode struct {
 // parallel over the pinned peer channel, so the dashboard can draw the whole
 // network from any one site.
 func (s *Server) mesh(w http.ResponseWriter, r *http.Request) {
-	nodes := []meshNode{{ID: s.cfg.NodeID, Self: true, Reachable: true, Status: s.statusData(r.Context())}}
+	nodes := []meshNode{{ID: s.cfg.NodeID, Self: true, Reachable: true, Status: s.statusData(r.Context(), s.isAdmin(r))}}
 	var targets []peer.Target
 	v := s.rt.View()
 	if v.Phase == node.PhaseRunning {

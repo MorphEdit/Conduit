@@ -62,9 +62,9 @@ docker compose up -d
 
 1. Open the first site's dashboard: <http://127.0.0.1:7420> — it founded a new cluster.
 2. The second site (<http://127.0.0.1:7421>) has nothing configured. It finds the first one on the LAN
-   and shows a 6-digit pairing code.
-3. On the first site's dashboard click **Approve** on the join request with the same code
-   (admin password: `change-me`).
+   and shows a 6-digit pairing code (click **แสดงรหัส** — "show code" — and enter the admin password to see it).
+3. On the first site's dashboard click **Approve** on the join request and type the code shown on the
+   second site (admin password: `change-me`).
 4. Done — the second site copies the tables and data and starts syncing. Try it:
 
    ```bash
@@ -100,7 +100,7 @@ docker run -d --name conduit --restart unless-stopped -p 7420:7420 -p 7443:7443 
 
 | Where is the new site? | What you do |
 |---|---|
-| Same LAN | Start it. Approve the join request (matching pairing code) on any running site's dashboard. |
+| Same LAN | Start it. Approve the join request on a running site's dashboard by typing the pairing code the new site shows. |
 | Anywhere else | Click **＋ Add site** on a dashboard (or run `docker exec conduit conduit invite`) and give the code to the new site: `-e CONDUIT_JOIN=cdt1_…` or paste it on its dashboard. |
 | Existing Postgres without the right settings | The dashboard asks first: click **Allow** (or set `CONDUIT_CONFIGURE_POSTGRES=true`), then **restart Postgres once**. |
 

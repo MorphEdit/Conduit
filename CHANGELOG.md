@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased — security and consistency fixes
+
+Upgrade every site: a new site joining through an older one (or the reverse) needs both on this version.
+
+- Security: a member site can no longer write outside the synced schemas on other sites (Conduit's own
+  tables, `pg_catalog`…); such changes are set aside as `schema_not_synced`
+- Security: LAN pairing is proven. The code stays on the new site and the admin types it when approving;
+  the new site ignores an approval that does not prove it (a mistyped code or a fake site on the LAN),
+  and the code is shown on the dashboard only to its admin. Beacons with impossible values are ignored
+- Id slots for new sites are always handed out by one site (the active site with the lowest slot), so two
+  sites admitting newcomers at the same time can no longer give out the same id range
+- A site cannot change its own id slot through gossip
+- New sites also copy delete markers (tombstones), so an old update cannot bring back a row deleted
+  before they joined
+- Table policies are re-published only when a site's config actually differs from the cluster's
+- Replay no longer crashes if a savepoint cannot be opened
+
 ## v0.2.0 — hardening from stress tests
 
 - Large transactions are captured in parts and applied atomically on the receiver from an on-disk spool:

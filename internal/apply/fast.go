@@ -48,6 +48,9 @@ func (a *Applier) applyFast(ctx context.Context, tx pgx.Tx, origin string, at ti
 		if seen[k] || len(ch.RowKey()) == 0 || (ch.Op != "I" && ch.Op != "U" && ch.Op != "D") {
 			return false, nil
 		}
+		if !a.Syncable(ch.Schema) {
+			return false, nil
+		}
 		if owner := a.cfg.Owner(ch.Schema, ch.Table); owner != "" && owner != origin {
 			return false, nil
 		}

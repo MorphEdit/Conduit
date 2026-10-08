@@ -32,7 +32,7 @@ func (s *Server) join(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad join request", http.StatusBadRequest)
 		return
 	}
-	resp, err := cluster.Admit(r.Context(), v.Store.Pool(), v.Identity, req)
+	resp, err := cluster.Admit(r.Context(), v.Store.Pool(), v.Identity, s.rt.Credentials(), req)
 	switch {
 	case errors.Is(err, cluster.ErrBadInvite):
 		http.Error(w, err.Error(), http.StatusForbidden)
@@ -82,12 +82,36 @@ func (s *Server) joinRequest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) joinPoll(w http.ResponseWriter, r *http.Request) {
-	status, invite, ok := s.rt.Requests.Poll(r.PathValue("id"), r.Header.Get("X-Request-Secret"))
+	status, invite, proof, ok := s.rt.Requests.Poll(r.PathValue("id"), r.Header.Get("X-Request-Secret"))
 	if !ok {
 		http.Error(w, "unknown request", http.StatusNotFound)
 		return
 	}
-	writeJSON(w, map[string]string{"status": status, "invite": invite})
+	writeJSON(w, map[string]string{"status": status, "invite": invite, "proof": proof})
+}
+
+// allocate assigns an id slot for a newcomer another member is admitting
+// (only the allocator answers; see cluster.Allocator).
+func (s *Server) allocate(w http.ResponseWriter, r *http.Request, caller string) {
+	v := s.rt.View()
+	var req cluster.JoinRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil ||
+		!config.ValidID(req.ID) || req.URL == "" || req.KeyHash == "" || req.CertFP == "" {
+		http.Error(w, "bad allocation request", http.StatusBadRequest)
+		return
+	}
+	offset, err := cluster.AllocateFor(r.Context(), v.Store.Pool(), v.Identity, req)
+	switch {
+	case errors.Is(err, cluster.ErrNameTaken), errors.Is(err, cluster.ErrNotAllocator):
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	case err != nil:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.log.Info("assigned an id slot", "site", req.ID, "offset", offset, "admitted_by", caller)
+	v.Manager.Trigger()
+	writeJSON(w, map[string]int64{"offset": offset})
 }
 
 // schema returns this site's table definitions for a new, empty site.
@@ -139,12 +163,21 @@ func (s *Server) decide(w http.ResponseWriter, r *http.Request) {
 	var err error
 	switch decision {
 	case "approve":
-		var code string
-		if code, _, err = cluster.CreateInvite(r.Context(), v.Store.Pool(), s.cfg.Advertise, v.TLS.Fingerprint, time.Hour); err == nil {
-			err = s.rt.Requests.Decide(id, true, code)
+		// The admin types the pairing code shown on the new site; the new
+		// site only accepts an approval proven with it.
+		var body struct {
+			Code string `json:"code"`
+		}
+		json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10)).Decode(&body)
+		if err = s.rt.Requests.Check(id, body.Code); err != nil {
+			break
+		}
+		var invite string
+		if invite, _, err = cluster.CreateInvite(r.Context(), v.Store.Pool(), s.cfg.Advertise, v.TLS.Fingerprint, time.Hour); err == nil {
+			err = s.rt.Requests.Approve(id, body.Code, invite, v.TLS.Fingerprint)
 		}
 	case "reject":
-		err = s.rt.Requests.Decide(id, false, "")
+		err = s.rt.Requests.Reject(id)
 	default:
 		http.NotFound(w, r)
 		return

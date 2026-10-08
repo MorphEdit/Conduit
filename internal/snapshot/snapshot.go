@@ -6,7 +6,8 @@
 // can join sync without replaying history.
 //
 // Wire format: newline-delimited JSON. One "header", then "row" lines
-// grouped by table and ordered by each row's commit timestamp, then "end".
+// grouped by table and ordered by each row's commit timestamp, then (when
+// the client asked for version 2) "tombstone" lines, then "end".
 package snapshot
 
 import (
@@ -27,6 +28,7 @@ import (
 	"github.com/MorphEdit/conduit/internal/change"
 	"github.com/MorphEdit/conduit/internal/config"
 	"github.com/MorphEdit/conduit/internal/peer"
+	"github.com/MorphEdit/conduit/internal/store"
 )
 
 type line struct {
@@ -42,9 +44,18 @@ type line struct {
 	At     *time.Time     `json:"at,omitempty"`
 	Change *change.Change `json:"change,omitempty"`
 
+	// tombstone
+	Tombstone *store.Tombstone `json:"tombstone,omitempty"`
+
 	// end
-	Rows int64 `json:"rows,omitempty"`
+	Rows       int64 `json:"rows,omitempty"`
+	Tombstones int64 `json:"tombstones,omitempty"`
 }
+
+// Version 2 adds the source's delete markers. Without them a new site would
+// let an old update from a third site bring back a row deleted before the
+// snapshot. Older sites ask for version 1 and never see the new line type.
+const Version = "2"
 
 // Serve streams a consistent snapshot of every published table.
 //
@@ -53,7 +64,7 @@ type line struct {
 // harmless because they are applied in order and compared by timestamp.
 // Cursors for other origins are read INSIDE the snapshot, so they match the
 // data exactly.
-func Serve(ctx context.Context, w http.ResponseWriter, pool *pgxpool.Pool, cfg *config.Config) error {
+func Serve(ctx context.Context, w http.ResponseWriter, pool *pgxpool.Pool, cfg *config.Config, withTombstones bool) error {
 	var seq int64
 	if err := pool.QueryRow(ctx,
 		`SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM conduit.outbox_seq_seq`).Scan(&seq); err != nil {
@@ -109,7 +120,20 @@ func Serve(ctx context.Context, w http.ResponseWriter, pool *pgxpool.Pool, cfg *
 		}
 		total += n
 	}
-	if err := enc.Encode(line{Type: "end", Rows: total}); err != nil {
+	var tombs int64
+	if withTombstones {
+		ts, err := store.Tombstones(ctx, tx)
+		if err != nil {
+			return fmt.Errorf("tombstones: %w", err)
+		}
+		for i := range ts {
+			if err := enc.Encode(line{Type: "tombstone", Tombstone: &ts[i]}); err != nil {
+				return err
+			}
+		}
+		tombs = int64(len(ts))
+	}
+	if err := enc.Encode(line{Type: "end", Rows: total, Tombstones: tombs}); err != nil {
 		return err
 	}
 	return bw.Flush()
@@ -181,7 +205,7 @@ func dumpTable(ctx context.Context, tx pgx.Tx, enc *json.Encoder, qualified stri
 // Pull loads a snapshot from the peer at peerURL into the local database.
 // Nothing else may be applying to this database while it runs.
 func Pull(ctx context.Context, cfg *config.Config, peerID string, target peer.Target, creds peer.Credentials, truncate bool, ap *apply.Applier, log *slog.Logger) error {
-	resp, err := peer.Do(ctx, target, creds, http.MethodGet, "/v1/snapshot", nil, 0)
+	resp, err := peer.Do(ctx, target, creds, http.MethodGet, "/v1/snapshot?v="+Version, nil, 0)
 	if err != nil {
 		return err
 	}
@@ -212,15 +236,39 @@ func Pull(ctx context.Context, cfg *config.Config, peerID string, target peer.Ta
 	}
 	log.Info("snapshot started", "from", peerID, "tables", len(hdr.Tables), "outbox_seq", hdr.Seq)
 
+	// Tables outside this site's synced schemas are left alone (and counted,
+	// so the row total still adds up).
 	var pendingTruncate []string
-	if truncate {
-		pendingTruncate = hdr.Tables
+	for _, t := range hdr.Tables {
+		schema, _, _ := strings.Cut(t, ".")
+		if !ap.Syncable(schema) {
+			log.Warn("snapshot: skipping a table outside this site's synced schemas", "table", t)
+		} else if truncate {
+			pendingTruncate = append(pendingTruncate, t)
+		}
+	}
+	if truncate && pendingTruncate == nil {
+		pendingTruncate = []string{}
 	}
 	var (
 		group   []change.Change
 		groupAt time.Time
 		applied int64
+		skipped int64
+		tombs   []store.Tombstone
+		tombN   int64
 	)
+	flushTombs := func() error {
+		if len(tombs) == 0 {
+			return nil
+		}
+		if err := ap.ApplyTombstones(ctx, peerID, tombs); err != nil {
+			return err
+		}
+		tombN += int64(len(tombs))
+		tombs = tombs[:0]
+		return nil
+	}
 	flush := func() error {
 		if err := ap.ApplyBaseline(ctx, peerID, groupAt, pendingTruncate, group); err != nil {
 			return err
@@ -241,13 +289,31 @@ func Pull(ctx context.Context, cfg *config.Config, peerID string, target peer.Ta
 					return err
 				}
 			}
-			if applied != l.Rows {
-				return fmt.Errorf("applied %d rows but peer sent %d", applied, l.Rows)
+			if err := flushTombs(); err != nil {
+				return err
+			}
+			if applied+skipped != l.Rows {
+				return fmt.Errorf("applied %d rows but peer sent %d", applied+skipped, l.Rows)
+			}
+			if tombN != l.Tombstones {
+				return fmt.Errorf("stored %d tombstones but peer sent %d", tombN, l.Tombstones)
 			}
 			break
 		}
+		if l.Type == "tombstone" && l.Tombstone != nil {
+			if tombs = append(tombs, *l.Tombstone); len(tombs) >= 500 {
+				if err := flushTombs(); err != nil {
+					return err
+				}
+			}
+			continue
+		}
 		if l.Type != "row" || l.Change == nil || l.At == nil {
 			return fmt.Errorf("bad snapshot line %q", l.Type)
+		}
+		if !ap.Syncable(l.Change.Schema) {
+			skipped++
+			continue
 		}
 		if len(group) > 0 && (!l.At.Equal(groupAt) || len(group) >= 500) {
 			if err := flush(); err != nil {

@@ -71,7 +71,7 @@ func (r *Runtime) join(ctx context.Context, st *store.Store) (*cluster.Identity,
 			if reqID == "" {
 				if b, ok := lan.Best(); ok && b.FP != "" {
 					t := peer.Target{URL: b.URL, Fingerprint: b.FP}
-					if id, err := r.requestJoin(ctx, t, pairing.Code, reqSecret); err == nil {
+					if id, err := r.requestJoin(ctx, t, reqSecret); err == nil {
 						reqID, seed = id, t
 						r.set(func() { pairing.SeedID, pairing.Status = b.ID, "requested" })
 						r.Log.Info("asked to join; approve it on the dashboard", "site", b.ID, "pairing_code", pairing.Code)
@@ -80,10 +80,18 @@ func (r *Runtime) join(ctx context.Context, st *store.Store) (*cluster.Identity,
 					}
 				}
 			} else {
-				status, invite, err := r.pollJoin(ctx, seed, reqID, reqSecret)
+				status, invite, proof, err := r.pollJoin(ctx, seed, reqID, reqSecret)
 				switch {
 				case err != nil:
 					reqID = "" // the other site restarted; ask again
+				case status == "approved" && !cluster.ProofMatches(proof, r.View().Pairing.Code, reqID, seed.Fingerprint, invite):
+					// Whoever approved did not know the code shown on this
+					// site: a mistyped code, or a fake site on the LAN. Never
+					// use what it sent; start over with a fresh code.
+					reqID, quietUntil = "", time.Now().Add(20*time.Second)
+					next := pairingCode()
+					r.set(func() { pairing.Code, pairing.Status = next, "bad_proof" })
+					r.Log.Warn("join approval did not prove the pairing code; ignored it", "site", pairing.SeedID, "new_pairing_code", next)
 				case status == "approved":
 					code = invite
 					continue
@@ -103,19 +111,21 @@ func (r *Runtime) join(ctx context.Context, st *store.Store) (*cluster.Identity,
 	}
 }
 
-func (r *Runtime) requestJoin(ctx context.Context, seed peer.Target, code, secret string) (string, error) {
-	body, _ := json.Marshal(map[string]string{"node_id": r.Cfg.NodeID, "url": r.Cfg.Advertise, "code": code, "secret": secret})
+// requestJoin asks a site found on the LAN to let this one in. The pairing
+// code is deliberately not sent: the approving admin types it instead.
+func (r *Runtime) requestJoin(ctx context.Context, seed peer.Target, secret string) (string, error) {
+	body, _ := json.Marshal(map[string]string{"node_id": r.Cfg.NodeID, "url": r.Cfg.Advertise, "secret": secret})
 	var out struct {
 		RequestID string `json:"request_id"`
 	}
 	return out.RequestID, call(ctx, seed, peer.Credentials{}, http.MethodPost, "/v1/join-requests", body, nil, &out)
 }
 
-func (r *Runtime) pollJoin(ctx context.Context, seed peer.Target, id, secret string) (string, string, error) {
-	var out struct{ Status, Invite string }
-	err := call(ctx, seed, peer.Credentials{}, http.MethodGet, "/v1/join-requests/"+id, nil,
+func (r *Runtime) pollJoin(ctx context.Context, seed peer.Target, id, secret string) (status, invite, proof string, err error) {
+	var out struct{ Status, Invite, Proof string }
+	err = call(ctx, seed, peer.Credentials{}, http.MethodGet, "/v1/join-requests/"+id, nil,
 		map[string]string{"X-Request-Secret": secret}, &out)
-	return out.Status, out.Invite, err
+	return out.Status, out.Invite, out.Proof, err
 }
 
 type httpError struct {

@@ -158,6 +158,7 @@ func putMember(ctx context.Context, pool *pgxpool.Pool, m Member) error {
 //
 //   - A site is the only authority on its own identity (URL, key hash,
 //     certificate): only a record served by that site itself may change them.
+//     Its id slot was assigned when it joined and never changes.
 //   - Other sites may only pass on that a member was removed.
 //   - Nobody may change this site's record except to mark it removed.
 //   - Records for sites we have never heard of are taken as they are (that is
@@ -176,6 +177,7 @@ func decide(local *Member, remote Member, self, from string) (Member, bool) {
 		return Member{}, false
 	}
 	if remote.ID == from && remote.ID != self {
+		remote.Offset = local.Offset
 		return remote, true
 	}
 	if remote.Status == "removed" && local.Status == "active" {
@@ -332,6 +334,64 @@ func allocate(ctx context.Context, pool *pgxpool.Pool, req JoinRequest, step int
 }
 
 var ErrNameTaken = errors.New("site name already used in this cluster")
+
+// ErrNotAllocator means this site does not hand out id slots.
+var ErrNotAllocator = errors.New("this site does not hand out id slots")
+
+// Allocator is the one member that hands out id slots: the active member
+// with the lowest offset (normally the founder). If every site picked slots
+// from its own member list, two sites admitting newcomers before gossip (or
+// while cut off from each other) could give out the same slot, and both
+// newcomers would then create rows with the same ids.
+func Allocator(ctx context.Context, pool *pgxpool.Pool) (*Member, error) {
+	ms, err := Members(ctx, pool) // ordered by offset
+	if err != nil {
+		return nil, err
+	}
+	for i := range ms {
+		if ms[i].Status == "active" {
+			return &ms[i], nil
+		}
+	}
+	return nil, errors.New("no active member")
+}
+
+// AllocateFor assigns a slot on the allocator itself, for a newcomer that
+// another member is admitting.
+func AllocateFor(ctx context.Context, pool *pgxpool.Pool, self *Identity, req JoinRequest) (int64, error) {
+	a, err := Allocator(ctx, pool)
+	if err != nil {
+		return 0, err
+	}
+	if a.ID != self.ID {
+		return 0, fmt.Errorf("%w (ask %s)", ErrNotAllocator, a.ID)
+	}
+	return allocate(ctx, pool, req, self.Step)
+}
+
+// adopt records a newcomer under the slot the allocator gave it.
+func adopt(ctx context.Context, pool *pgxpool.Pool, req JoinRequest, offset int64) error {
+	var holder string
+	err := pool.QueryRow(ctx, `SELECT id FROM conduit.members WHERE id_offset = $1 AND id <> $2`, offset, req.ID).Scan(&holder)
+	if err == nil {
+		return fmt.Errorf("id slot %d from the allocator is already used by %s here", offset, holder)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	now := time.Now()
+	_, err = pool.Exec(ctx,
+		`INSERT INTO conduit.members (id, url, id_offset, status, key_hash, cert_fp, joined_at, updated_at)
+		 VALUES ($1, $2, $3, 'active', $4, $5, $6, $6) ON CONFLICT (id) DO NOTHING`,
+		req.ID, strings.TrimRight(req.URL, "/"), offset, req.KeyHash, req.CertFP, now)
+	return err
+}
+
+func nameTaken(ctx context.Context, pool *pgxpool.Pool, id string) (bool, error) {
+	var n int
+	err := pool.QueryRow(ctx, `SELECT count(*) FROM conduit.members WHERE id = $1`, id).Scan(&n)
+	return n > 0, err
+}
 
 // WasRemoved reports whether id/secret belong to a member that has been
 // removed, so it can be told to stop instead of just being refused.

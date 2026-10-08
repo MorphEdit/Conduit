@@ -20,7 +20,8 @@ Security fixes are released for the latest version. Please upgrade before report
   certificate that other sites pin by fingerprint (shared through invite codes and the member list).
 - Each site authenticates with its own secret; other sites only store its hash. Removing a site
   revokes it everywhere as soon as the news spreads (about 10 seconds).
-- A site can only deliver its own changes; it cannot pretend to be another site.
+- A site can only deliver its own changes; it cannot pretend to be another site. Changes are applied only to
+  the synced schemas: never to Conduit's own tables (`conduit`) or the system catalogs.
 - A site's address, key and certificate can only be changed by that site itself. Other sites may only pass on
   that a member was removed, so one compromised site cannot redirect traffic meant for another.
 - LAN join requests are accepted only from private addresses, two pending per address.
@@ -29,8 +30,11 @@ Security fixes are released for the latest version. Please upgrade before report
 - The dashboard (port 7420) is plain HTTP and meant for your LAN. Protect it with
   `CONDUIT_ADMIN_PASSWORD`, and put a TLS reverse proxy in front if you expose it further.
 - Invite codes are single-use and expire after 24 hours. Treat them like passwords.
-- LAN discovery trusts the first certificate it hears about (like SSH's first connection).
-  On an untrusted LAN, use invite codes instead.
+- LAN joins are proven with the pairing code: it is shown only on the new site's dashboard (only to its admin
+  when `CONDUIT_ADMIN_PASSWORD` is set) and never sent over the network. The admin types it when approving,
+  and the new site accepts only an approval proven with it, so a fake site answering on the LAN cannot
+  take over the join. Set an admin password on new sites too; on an untrusted LAN, invite codes are still
+  the safest way in.
 
 ---
 

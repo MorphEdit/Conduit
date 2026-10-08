@@ -5,6 +5,7 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -13,10 +14,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/MorphEdit/conduit/internal/peer"
 )
 
 const invitePrefix = "cdt1_"
@@ -110,12 +115,14 @@ type JoinResponse struct {
 	View      View   `json:"view"`
 }
 
-// Admit handles a join on the admitting (seed) site.
-func Admit(ctx context.Context, pool *pgxpool.Pool, self *Identity, req JoinRequest) (*JoinResponse, error) {
+// Admit handles a join on the admitting (seed) site. The id slot always comes
+// from the allocator (see Allocator); creds sign the request when that is
+// another site.
+func Admit(ctx context.Context, pool *pgxpool.Pool, self *Identity, creds peer.Credentials, req JoinRequest) (*JoinResponse, error) {
 	if err := redeem(ctx, pool, req.Secret, req.ID); err != nil {
 		return nil, err
 	}
-	offset, err := allocate(ctx, pool, req, self.Step)
+	offset, err := assign(ctx, pool, self, creds, req)
 	if err != nil {
 		unredeem(ctx, pool, req.Secret)
 		return nil, err
@@ -125,6 +132,53 @@ func Admit(ctx context.Context, pool *pgxpool.Pool, self *Identity, req JoinRequ
 		return nil, err
 	}
 	return &JoinResponse{ClusterID: self.ClusterID, Offset: offset, Step: self.Step, Seed: self.ID, View: view}, nil
+}
+
+func assign(ctx context.Context, pool *pgxpool.Pool, self *Identity, creds peer.Credentials, req JoinRequest) (int64, error) {
+	a, err := Allocator(ctx, pool)
+	if err != nil {
+		return 0, err
+	}
+	if a.ID == self.ID {
+		return allocate(ctx, pool, req, self.Step)
+	}
+	if taken, err := nameTaken(ctx, pool, req.ID); err != nil || taken {
+		if err == nil {
+			err = fmt.Errorf("%w: %q", ErrNameTaken, req.ID)
+		}
+		return 0, err
+	}
+	offset, err := remoteAllocate(ctx, *a, creds, req)
+	if err != nil {
+		return 0, err
+	}
+	return offset, adopt(ctx, pool, req, offset)
+}
+
+// remoteAllocate asks the allocator for a slot. The invite secret stays here.
+func remoteAllocate(ctx context.Context, a Member, creds peer.Credentials, req JoinRequest) (int64, error) {
+	req.Secret = ""
+	body, _ := json.Marshal(req)
+	resp, err := peer.Do(ctx, peer.Target{URL: a.URL, Fingerprint: a.CertFP}, creds,
+		http.MethodPost, "/v1/allocate", bytes.NewReader(body), 15*time.Second)
+	if err != nil {
+		return 0, fmt.Errorf("%s hands out id slots and cannot be reached right now (%v); try again when it is online", a.ID, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		if resp.StatusCode == http.StatusConflict && strings.Contains(string(msg), ErrNameTaken.Error()) {
+			return 0, fmt.Errorf("%w: %q", ErrNameTaken, req.ID)
+		}
+		return 0, fmt.Errorf("%s could not assign an id slot: %s %s", a.ID, resp.Status, bytes.TrimSpace(msg))
+	}
+	var out struct {
+		Offset int64 `json:"offset"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || out.Offset < 1 {
+		return 0, fmt.Errorf("%s sent a bad id slot answer", a.ID)
+	}
+	return out.Offset, nil
 }
 
 func (r *JoinResponse) String() string {

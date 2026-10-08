@@ -11,6 +11,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/MorphEdit/conduit/internal/config"
 )
 
 // LAN discovery: running sites broadcast a small UDP beacon; a new site
@@ -108,7 +110,10 @@ func Listen(ctx context.Context, log *slog.Logger) *Listener {
 				return
 			}
 			var b Beacon
-			if json.Unmarshal(buf[:n], &b) != nil || b.V != 1 || b.URL == "" {
+			// Beacons are unauthenticated: drop anything a real site would
+			// never send, such as an id slot below 1 claimed to win Best().
+			if json.Unmarshal(buf[:n], &b) != nil || b.V != 1 || b.URL == "" || b.Offset < 1 ||
+				!config.ValidID(b.ID) || len(b.FP) != 64 {
 				continue
 			}
 			l.mu.Lock()

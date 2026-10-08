@@ -15,17 +15,23 @@ import (
 // PendingJoin is a site found on the LAN asking to be let in. An admin
 // compares Code with the one shown on the new site, then approves.
 type PendingJoin struct {
-	ID        string    `json:"id"`
-	NodeID    string    `json:"node_id"`
-	URL       string    `json:"url"`
-	Code      string    `json:"code"`
+	ID     string `json:"id"`
+	NodeID string `json:"node_id"`
+	URL    string `json:"url"`
+	// Code is only sent by sites older than v0.3; newer ones keep it to
+	// themselves and the admin types it when approving (see PairingProof).
+	Code      string    `json:"code,omitempty"`
 	Status    string    `json:"status"` // pending | approved | rejected
 	CreatedAt time.Time `json:"created_at"`
 	From      string    `json:"from"` // requester's IP address
 
 	secretHash string
 	invite     string
+	proof      string
 }
+
+// ErrCodeMismatch means the typed pairing code is not the one the site sent.
+var ErrCodeMismatch = errors.New("pairing code does not match the one shown on the new site")
 
 // Requests holds join requests in memory; a restart simply makes the new
 // site ask again.
@@ -84,31 +90,61 @@ func (r *Requests) Add(from, nodeID, url, code, secret string) (string, error) {
 
 // Poll lets the requesting site learn the outcome; it proves it made the
 // request with the secret only it knows.
-func (r *Requests) Poll(id, secret string) (status, invite string, ok bool) {
+func (r *Requests) Poll(id, secret string) (status, invite, proof string, ok bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	p, found := r.m[id]
 	if !found || subtle.ConstantTimeCompare([]byte(p.secretHash), []byte(hashSecret(secret))) != 1 {
-		return "", "", false
+		return "", "", "", false
 	}
 	if p.Status != "pending" {
 		delete(r.m, id)
 	}
-	return p.Status, p.invite, true
+	return p.Status, p.invite, p.proof, true
 }
 
-func (r *Requests) Decide(id string, approve bool, invite string) error {
+var errNoRequest = errors.New("no such pending request")
+
+// Check validates a typed pairing code before an approval. Older sites sent
+// their code, so it can be compared; newer ones can only be checked by the
+// new site itself, through the proof.
+func (r *Requests) Check(id, code string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	p, ok := r.m[id]
 	if !ok || p.Status != "pending" {
-		return errors.New("no such pending request")
+		return errNoRequest
 	}
-	if approve {
-		p.Status, p.invite = "approved", invite
-	} else {
-		p.Status = "rejected"
+	if len(NormalizeCode(code)) != 6 {
+		return errors.New("type the 6-digit pairing code shown on the new site")
 	}
+	if p.Code != "" && NormalizeCode(p.Code) != NormalizeCode(code) {
+		return ErrCodeMismatch
+	}
+	return nil
+}
+
+// Approve hands the request its invite, with the proof that the approving
+// admin knew the code shown on the new site.
+func (r *Requests) Approve(id, code, invite, seedFP string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p, ok := r.m[id]
+	if !ok || p.Status != "pending" {
+		return errNoRequest
+	}
+	p.Status, p.invite, p.proof = "approved", invite, PairingProof(code, id, seedFP, invite)
+	return nil
+}
+
+func (r *Requests) Reject(id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p, ok := r.m[id]
+	if !ok || p.Status != "pending" {
+		return errNoRequest
+	}
+	p.Status = "rejected"
 	return nil
 }
 

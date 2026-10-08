@@ -300,9 +300,11 @@
     if (joining) {
       const p = st.pairing || {};
       $('pair-code').textContent = p.code || '— — —';
+      $('show-code').hidden = !p.hidden;
       $('join-title').textContent = st.phase === 'joining' ? (st.notice || 'กำลังเข้าร่วม…') :
         p.status === 'requested' ? `ส่งคำขอไปที่ ${String(p.seed_id || '').toUpperCase()} แล้ว — รออนุมัติ` :
-        p.status === 'rejected' ? 'คำขอถูกปฏิเสธ — จะลองใหม่ใน 5 นาที' : 'กำลังค้นหาไซต์อื่นในวง LAN…';
+        p.status === 'rejected' ? 'คำขอถูกปฏิเสธ — จะลองใหม่ใน 5 นาที' :
+        p.status === 'bad_proof' ? 'การอนุมัติใช้รหัสไม่ตรง — สร้างรหัสใหม่แล้ว กดอนุมัติอีกครั้งด้วยรหัสใหม่' : 'กำลังค้นหาไซต์อื่นในวง LAN…';
       $('paste-form').hidden = st.phase === 'joining';
     }
 
@@ -310,7 +312,7 @@
     const reqs = m.requests || [];
     $('requests').hidden = reqs.length === 0;
     $('request-rows').innerHTML = reqs.map(r => `<li>
-      <span class="rq-name">${esc(r.node_id)}</span><span class="rq-code">${esc(r.code)}</span>
+      <span class="rq-name">${esc(r.node_id)}</span>${r.code ? `<span class="rq-code">${esc(r.code)}</span>` : ''}
       <span class="rq-meta">${esc(r.url)} · ${rel(r.created_at)}</span>
       <span class="rq-actions">${r.holder === m.self
         ? `<button type="button" data-approve="${esc(r.id)}">อนุมัติ</button><button type="button" class="reject" data-reject="${esc(r.id)}">ปฏิเสธ</button>`
@@ -324,9 +326,24 @@
     const a = e.target.closest('[data-approve],[data-reject]');
     if (!a) return;
     const id = a.dataset.approve || a.dataset.reject;
-    if (a.dataset.approve && !confirm('รหัสจับคู่ตรงกับที่หน้าจอไซต์ใหม่แสดงใช่ไหม?')) return;
-    try { await adminFetch(`v1/admin/requests/${id}/${a.dataset.approve ? 'approve' : 'reject'}`); tick(); }
+    let body;
+    if (a.dataset.approve) {
+      // The code is shown only on the new site's own screen; typing it here
+      // proves to the new site that this approval is genuine.
+      const code = window.prompt('พิมพ์รหัสจับคู่ 6 หลักที่แสดงบนหน้าจอของไซต์ใหม่');
+      if (code === null) return;
+      body = { code };
+    }
+    try { await adminFetch(`v1/admin/requests/${id}/${a.dataset.approve ? 'approve' : 'reject'}`, body); tick(); }
     catch (err) { alert(err.message); }
+  });
+  $('show-code').addEventListener('click', async () => {
+    const pw = window.prompt('รหัส admin ของไซต์นี้ (CONDUIT_ADMIN_PASSWORD)');
+    if (!pw) return;
+    const r = await fetch('v1/admin/check', { headers: { 'X-Admin-Password': pw } }).catch(() => null);
+    if (!r || !r.ok) { alert('รหัส admin ไม่ถูกต้อง'); return; }
+    adminPw = pw;
+    tick();
   });
   $('allow-pg').addEventListener('click', async () => {
     if (!confirm('Conduit จะตั้งค่า wal_level=logical และ track_commit_timestamp=on ให้ Postgres ของไซต์นี้\nจากนั้นต้อง restart Postgres หนึ่งครั้ง — ดำเนินการต่อไหม?')) return;
@@ -403,7 +420,7 @@
     let raw = null;
     if (!forceDemo && location.protocol !== 'file:') {
       try {
-        const r = await fetch('v1/mesh', { cache: 'no-store' });
+        const r = await fetch('v1/mesh', { cache: 'no-store', headers: adminPw ? { 'X-Admin-Password': adminPw } : {} });
         if (r.ok) raw = await r.json();
       } catch (_) { /* fall through */ }
     }
