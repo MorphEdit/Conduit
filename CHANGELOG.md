@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — security and consistency fixes
+## v0.3.0 — security and consistency fixes
 
 Upgrade every site: a new site joining through an older one (or the reverse) needs both on this version.
 
@@ -16,6 +16,7 @@ Upgrade every site: a new site joining through an older one (or the reverse) nee
   before they joined
 - Table policies are re-published only when a site's config actually differs from the cluster's
 - Replay no longer crashes if a savepoint cannot be opened
+- golang.org/x/text 0.41.0 (fixes GO-2026-6629 and GO-2026-5970, reachable when connecting to Postgres)
 
 ## v0.2.0 — hardening from stress tests
 

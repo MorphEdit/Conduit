@@ -12,7 +12,7 @@ body:
     attributes:
       label: Conduit version
       description: Output of `conduit version`
-      placeholder: Conduit 0.1.0 (abc1234) — by MorphEdit
+      placeholder: Conduit 0.3.0 (abc1234) — by MorphEdit
     validations:
       required: true
   - type: input

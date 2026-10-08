@@ -6,7 +6,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-ARG VERSION=0.2.0
+ARG VERSION=0.3.0
 ARG COMMIT=
 RUN CGO_ENABLED=0 go build -trimpath \
     -ldflags="-s -w -X github.com/MorphEdit/conduit/internal/buildinfo.Version=${VERSION} -X github.com/MorphEdit/conduit/internal/buildinfo.Commit=${COMMIT}" \
