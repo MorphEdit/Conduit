@@ -8,120 +8,136 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Conduit — Sync Mesh</title>
-<meta name="description" content="แผงสถานะ Conduit: ดูการซิงก์ข้อมูลระหว่างทุกไซต์แบบสด">
+<title>Conduit — แผงสถานะ</title>
+<meta name="description" content="แผงสถานะ Conduit: ผัง 3 มิติของทุกไซต์และการซิงก์แบบสด">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a1014'/%3E%3Cpath d='M22 10a8 8 0 1 0 0 12' stroke='%235de0c8' stroke-width='3' fill='none'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="style.css">
+<!-- three.js is bundled (vendor/three): the dashboard must work on a LAN without internet -->
+<script type="importmap">{ "imports": { "three": "./vendor/three/three.module.min.js", "three/addons/": "./vendor/three/" } }</script>
 </head>
 <body>
-<header class="topbar">
-  <a class="brand" href="./" aria-label="Conduit หน้าแรก"><span class="brand-mark">C</span>CONDUIT<span class="brand-suffix" id="self-node">/ —</span></a>
-  <span class="top-caption">MULTI-SITE SYNC</span>
-  <span class="mode" id="mode">CONNECTING</span>
-</header>
-
-<main>
-  <div class="intro">
-    <div>
-      <p class="eyebrow">01 / TOPOLOGY</p>
-      <h1>Every site, in sync<span>.</span></h1>
-      <p class="subtitle">ข้อมูลไหลถึงกันทุกไซต์ แม้เน็ตจะหลุด</p>
-    </div>
-    <div class="scene-caption">
-      <span class="status-dot" id="pulse"></span><span id="summary">กำลังเชื่อมต่อ…</span>
-      <span class="caption-small" id="updated">—</span>
-    </div>
+<div class="app">
+  <!-- the 3D map fills the screen; everything else floats over it -->
+  <div class="viewport" id="viewport">
+    <div class="no3d" id="no3d" hidden>เบราว์เซอร์นี้แสดงผัง 3 มิติไม่ได้ — ข้อมูลทั้งหมดยังดูได้ในแผงด้านข้าง</div>
   </div>
 
-  <div class="banner" id="banner" role="status" hidden><span id="banner-text"></span>
-    <button class="ghost" id="allow-pg" type="button" hidden>อนุญาตให้ตั้งค่า Postgres</button>
-    <button class="ghost" id="replay" type="button" hidden>ลองใส่ข้อมูลที่ข้ามไปอีกครั้ง</button>
-  </div>
+  <header class="hud topbar">
+    <a class="brand" href="./" aria-label="Conduit หน้าแรก"><span class="brand-mark" aria-hidden="true">C</span>CONDUIT<span class="brand-site" id="self-node"></span></a>
+    <div class="health" id="health">
+      <span class="health-icon" id="health-icon" aria-hidden="true">●</span>
+      <div class="health-copy">
+        <h1 id="health-title"><span id="health-text" aria-live="polite">กำลังเชื่อมต่อ Conduit…</span></h1>
+        <p class="health-sub" id="health-sub">ลากเพื่อหมุน · scroll เพื่อซูม · คลิกไซต์เพื่อดูรายละเอียด</p>
+      </div>
+    </div>
+    <div class="top-right">
+      <span class="mode" id="mode"><i aria-hidden="true"></i><span id="mode-text">กำลังเชื่อมต่อ</span></span>
+      <button class="btn" id="add-site" type="button" hidden>＋ เพิ่มไซต์</button>
+    </div>
+  </header>
 
-  <section class="join-panel" id="join-panel" aria-label="เข้าร่วมเครือข่าย" hidden>
-    <div>
-      <p class="eyebrow">ไซต์นี้ยังไม่ได้เข้าร่วม</p>
+  <!-- camera controls -->
+  <nav class="hud cam" id="cam" aria-label="ควบคุมมุมมอง 3 มิติ">
+    <div class="cam-row"><button class="cbtn" type="button" data-cam="in" aria-label="ซูมเข้า">＋</button><button class="cbtn" type="button" data-cam="out" aria-label="ซูมออก">−</button></div>
+    <div class="cam-row"><button class="cbtn" type="button" data-cam="rotl" aria-label="หมุนซ้าย">↺</button><button class="cbtn" type="button" data-cam="rotr" aria-label="หมุนขวา">↻</button></div>
+    <div class="cam-pad">
+      <button class="cbtn up" type="button" data-cam="up" aria-label="เลื่อนขึ้น">▲</button>
+      <button class="cbtn left" type="button" data-cam="left" aria-label="เลื่อนซ้าย">◀</button>
+      <button class="cbtn home" type="button" data-cam="home" aria-label="กลับมุมมองเริ่มต้น">⌂</button>
+      <button class="cbtn right" type="button" data-cam="right" aria-label="เลื่อนขวา">▶</button>
+      <button class="cbtn down" type="button" data-cam="down" aria-label="เลื่อนลง">▼</button>
+    </div>
+    <button class="cbtn wide" id="motion" type="button" aria-pressed="false"><span class="pause-symbol" aria-hidden="true">Ⅱ</span><span id="motion-label">หยุดเคลื่อนไหว</span></button>
+  </nav>
+
+  <ul class="hud legend" aria-label="ความหมายของเส้น">
+    <li><i class="ok"></i>ซิงก์แล้ว</li><li><i class="busy"></i>มีคิว</li><li><i class="warn"></i>กำลังลองใหม่</li><li><i class="down"></i>ขาดการเชื่อมต่อ</li>
+  </ul>
+
+  <!-- side panel -->
+  <aside class="hud side" id="side" aria-label="รายละเอียด">
+    <!-- this site is not in a cluster yet -->
+    <section class="block join-panel" id="join-panel" aria-labelledby="join-title" hidden>
+      <p class="eyebrow">ไซต์นี้ยังไม่ได้เข้าร่วมเครือข่าย</p>
       <h2 id="join-title">กำลังค้นหาไซต์อื่นในวง LAN…</h2>
-      <p class="join-help" id="join-help">เปิด dashboard ของไซต์ที่ทำงานอยู่ กดอนุมัติคำขอ แล้วพิมพ์รหัสจับคู่ด้านขวา (อย่าบอกรหัสนี้กับใครนอกจากคนที่กดอนุมัติ)</p>
+      <div class="pair-code">
+        <span>รหัสจับคู่</span>
+        <strong id="pair-code">— — —</strong>
+        <button class="btn" id="show-code" type="button" hidden>แสดงรหัส (ใช้รหัส admin)</button>
+      </div>
+      <ol class="join-steps">
+        <li>เปิด dashboard ของไซต์ที่ทำงานอยู่ แล้วกด <b>อนุมัติ</b> ที่คำขอของไซต์นี้</li>
+        <li>พิมพ์ <b>รหัสจับคู่</b> ด้านบนลงไป (อย่าบอกรหัสนี้กับคนอื่น)</li>
+      </ol>
       <form class="paste" id="paste-form">
-        <label for="paste-input">หรือแปะรหัสเชิญ</label>
-        <div><input id="paste-input" placeholder="cdt1_…" autocomplete="off" spellcheck="false"><button type="submit">เข้าร่วม</button></div>
-        <span class="form-msg" id="paste-msg"></span>
+        <label for="paste-input">หรือแปะรหัสเชิญ (ไซต์อยู่ต่างที่)</label>
+        <div><input id="paste-input" placeholder="cdt1_…" autocomplete="off" spellcheck="false"><button class="btn primary" type="submit">เข้าร่วม</button></div>
+        <span class="form-msg" id="paste-msg" role="status"></span>
       </form>
-    </div>
-    <div class="pair-code"><span>รหัสจับคู่</span><strong id="pair-code">— — —</strong>
-      <button class="ghost" id="show-code" type="button" hidden>แสดงรหัส (ใช้รหัส admin)</button></div>
-  </section>
+    </section>
 
-  <section class="experience" aria-label="ผังการเชื่อมต่อของทุกไซต์">
-    <div class="stage" id="stage">
-      <svg class="scene" id="scene" viewBox="0 0 1536 1024" role="img" aria-label="ผัง isometric ของไซต์และเส้นซิงก์">
-        <defs>
-          <filter id="glow" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="5"/></filter>
-          <filter id="soft" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="18"/></filter>
-          <radialGradient id="floor-fade" cx="50%" cy="52%" r="55%">
-            <stop offset="0" stop-color="#1a2429"/><stop offset="1" stop-color="#111619" stop-opacity="0"/>
-          </radialGradient>
-        </defs>
-        <ellipse cx="768" cy="560" rx="760" ry="430" fill="url(#floor-fade)"/>
-        <g id="grid"></g>
-        <g id="links"></g>
-        <g id="sites"></g>
-      </svg>
-      <div class="hotspots" id="hotspots"></div>
-      <div class="legend" aria-label="ความหมายของสีเส้น">
-        <span><i class="ok"></i>ซิงก์แล้ว</span>
-        <span><i class="busy"></i>มีคิวรอส่ง</span>
-        <span><i class="warn"></i>กำลัง retry</span>
-        <span><i class="down"></i>ขาดการเชื่อมต่อ</span>
+    <!-- things that need a person -->
+    <section class="block attention" id="attention" aria-labelledby="attention-title" hidden>
+      <h2 class="block-title" id="attention-title"><span class="dot warn" aria-hidden="true"></span>ต้องจัดการ</h2>
+      <div class="alert" id="banner" hidden>
+        <span class="alert-text" id="banner-text"></span>
+        <div class="alert-actions">
+          <button class="btn" id="allow-pg" type="button" hidden>อนุญาตให้ตั้งค่า Postgres</button>
+          <button class="btn" id="replay" type="button" hidden>ลองใส่ข้อมูลที่ข้ามไปอีกครั้ง</button>
+        </div>
       </div>
-      <button class="motion-button" id="motion" type="button" aria-pressed="false">
-        <span class="pause-symbol" aria-hidden="true">Ⅱ</span><span id="motion-label">หยุดการเคลื่อนไหว</span>
-      </button>
-    </div>
-  </section>
-
-  <section class="controls" aria-label="เลือกไซต์">
-    <div class="control-heading"><span>ไซต์ทั้งหมด</span><span class="hint">เลือกจุดบนภาพหรือไซต์ด้านล่าง</span>
-      <button class="ghost" id="add-site" type="button">＋ เพิ่มไซต์</button></div>
-    <div class="invite-box" id="invite-box" hidden>
-      <p>รหัสเชิญ (ใช้ได้ครั้งเดียว · หมดอายุ <span id="invite-exp"></span>) — แปะที่ dashboard ของไซต์ใหม่ หรือตั้ง <code>CONDUIT_JOIN</code></p>
-      <div class="code-row"><code id="invite-code"></code><button class="ghost" id="copy-invite" type="button">คัดลอก</button></div>
-    </div>
-    <div class="requests" id="requests" hidden>
-      <h2>ไซต์ใหม่ขอเข้าร่วม</h2>
-      <ul id="request-rows"></ul>
-    </div>
-    <div class="site-list" id="site-list"></div>
-
-    <div class="detail" aria-live="polite">
-      <div class="selected-name">
-        <span class="status-dot" id="detail-dot"></span><strong id="detail-title">—</strong>
-        <span class="pill" id="detail-state">—</span>
-        <button class="ghost danger" id="remove-site" type="button" hidden>ถอดไซต์นี้ออก</button>
+      <div class="sub-block" id="requests" hidden>
+        <h3>ไซต์ใหม่ขอเข้าร่วม</h3>
+        <p class="hint">กดอนุมัติ แล้วพิมพ์รหัสจับคู่ที่แสดงบนหน้าจอของไซต์ใหม่</p>
+        <ul class="requests" id="request-rows"></ul>
       </div>
-      <dl>
-        <div><dt>OUTBOX</dt><dd id="m-outbox">—</dd></div>
-        <div><dt>CAPTURED</dt><dd id="m-captured">—</dd></div>
-        <div><dt>CONFLICTS</dt><dd id="m-conflicts">—</dd></div>
-        <div><dt>ID OFFSET</dt><dd id="m-offset">—</dd></div>
+      <div class="sub-block" id="invite-box" hidden>
+        <h3>รหัสเชิญ</h3>
+        <p class="hint">ใช้ได้ครั้งเดียว · หมดอายุ <span id="invite-exp"></span> — แปะที่ dashboard ของไซต์ใหม่ หรือตั้ง <code>CONDUIT_JOIN</code></p>
+        <code class="invite-code" id="invite-code"></code>
+        <div class="row-actions"><button class="btn" id="copy-invite" type="button">คัดลอก</button><button class="btn quiet" id="close-invite" type="button">ปิด</button></div>
+      </div>
+    </section>
+
+    <!-- every site -->
+    <section class="block" id="sites-block" aria-labelledby="sites-title">
+      <h2 class="block-title" id="sites-title">ไซต์ <span class="count" id="site-count"></span></h2>
+      <ul class="site-list" id="site-rows"></ul>
+    </section>
+
+    <!-- the selected site -->
+    <section class="block detail" id="detail" aria-labelledby="detail-title">
+      <div class="detail-head">
+        <h2 id="detail-title">—</h2>
+        <span class="state" id="detail-state"></span>
+      </div>
+      <dl class="facts">
+        <div><dt>คิวรอส่ง</dt><dd id="m-outbox">—</dd></div>
+        <div><dt>จับการเปลี่ยนแปลง</dt><dd id="m-captured">—</dd></div>
+        <div><dt>Conflict</dt><dd id="m-conflicts">—</dd></div>
+        <div><dt>ชุด ID</dt><dd id="m-offset">—</dd></div>
       </dl>
-    </div>
+      <h3>เส้นเชื่อมต่อ</h3>
+      <ul class="rows" id="link-rows"></ul>
+      <h3>Conflict ล่าสุด</h3>
+      <ul class="rows" id="conflict-rows"></ul>
+      <button class="btn danger" id="remove-site" type="button" hidden>ถอดไซต์นี้ออกจากเครือข่าย</button>
+    </section>
+  </aside>
 
-    <div class="panels">
-      <div class="panel">
-        <h2>เส้นเชื่อมต่อ <span id="links-for"></span></h2>
-        <ul class="link-rows" id="link-rows"></ul>
-      </div>
-      <div class="panel">
-        <h2>Conflict ล่าสุด</h2>
-        <ul class="conflict-rows" id="conflict-rows"></ul>
-      </div>
-    </div>
-  </section>
-</main>
-
-<footer><span>CONDUIT <span id="version"></span> / POSTGRES MULTI-SITE SYNC</span><span>by <a class="credit" href="https://github.com/MorphEdit" target="_blank" rel="noopener">MorphEdit</a></span></footer>
-<script src="app.js"></script>
+  <!-- status bar -->
+  <footer class="hud statusbar">
+    <ul class="checks" aria-label="สรุปสถานะ">
+      <li id="c-online"><b>ไซต์</b> <span>—</span></li>
+      <li id="c-queue"><b>คิวรอส่ง</b> <span>—</span></li>
+      <li id="c-conflicts"><b>Conflict</b> <span>—</span></li>
+      <li id="c-wal"><b>WAL ไซต์นี้</b> <span>—</span></li>
+      <li id="c-updated" class="muted"></li>
+    </ul>
+    <span class="credit-line">CONDUIT <span id="version"></span> · by <a class="credit" href="https://github.com/MorphEdit" target="_blank" rel="noopener">MorphEdit</a></span>
+  </footer>
+</div>
+<script type="module" src="app.js"></script>
 </body>
 </html>

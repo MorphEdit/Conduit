@@ -1,0 +1,4 @@
+three.js r170 (npm three@0.170.0, MIT, see LICENSE)
+sha512 of the npm tarball: FQK+LEpYc0fBD+J8g6oSEyyNzjp+Q7Ks1C568WWaoMRLW+TkNNWmenWeGgJjV105Gd+p/2ql1ZcjYvNiPZBhuQ==
+Files: build/three.module.min.js, examples/jsm/controls/OrbitControls.js, examples/jsm/renderers/CSS2DRenderer.js (unmodified)
+Bundled so the dashboard works on a LAN without internet.

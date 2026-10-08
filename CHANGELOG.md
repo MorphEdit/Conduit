@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- New dashboard: a full-screen 3D map of every site (drag to rotate, scroll to zoom, arrow keys / WASD to
+  pan) with live sync lines, packets, alarms and labels; a one-line health summary, a "needs attention" panel,
+  the site list and the selected site's details float over it. Works on phones (map on top, panels below)
+- three.js r170 (MIT) is bundled in the binary, so the dashboard keeps working on a LAN without internet;
+  the dashboard no longer loads web fonts either
+- Sample data shows only with `?demo`, never in place of a site that cannot be reached
+
 ## v0.3.0 — security and consistency fixes
 
 Upgrade every site: a new site joining through an older one (or the reverse) needs both on this version.
