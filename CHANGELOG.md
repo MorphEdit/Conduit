@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## v0.4.0 — security and consistency fixes, 3D dashboard
+
+Upgrade every site: LAN joins need both sites on this version, and delete markers are kept until every
+site runs it.
 
 - New dashboard: a full-screen 3D map of every site (drag to rotate, scroll to zoom, arrow keys / WASD to
   pan) with live sync lines, packets, alarms and labels; a one-line health summary, a "needs attention" panel,
