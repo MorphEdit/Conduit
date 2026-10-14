@@ -257,6 +257,20 @@ Sql host "UPDATE customers SET name = name WHERE code = 'DUP-1'" | Out-Null
 AssertSynced 'converged after manual resolution'
 
 # ---------------------------------------------------------------------------
+Section "8b. a row the other site's table rejects does not block the queue"
+Sql local "ALTER TABLE customers ADD CONSTRAINT short_name CHECK (length(name) < 40)" | Out-Null
+$beforeSkip = ConflictCount local 'schema_mismatch'
+Sql host "INSERT INTO customers (code, name) VALUES ('LONG-1', repeat('x', 60))" | Out-Null
+Sql host "INSERT INTO customers (code, name) VALUES ('AFTER-LONG', 'queue still moving')" | Out-Null
+$deadline = (Get-Date).AddSeconds(60)
+while ((Get-Date) -lt $deadline -and (Sql local "SELECT count(*) FROM customers WHERE code = 'AFTER-LONG'") -ne '1') { Start-Sleep 1 }
+Check ((Sql local "SELECT count(*) FROM customers WHERE code = 'AFTER-LONG'") -eq '1') 'a CHECK only local has does not hold up later changes'
+Check ((ConflictCount local 'schema_mismatch') -gt $beforeSkip) 'the rejected row was set aside for replay'
+Sql local "ALTER TABLE customers DROP CONSTRAINT short_name" | Out-Null
+Check ((Admin local '/v1/admin/replay') -eq 200) 'admin replayed the set-aside row after fixing the table'
+AssertSynced 'converged after the replay'
+
+# ---------------------------------------------------------------------------
 Section "9. outages"
 Compose stop conduit-local 2>&1 | Out-Null
 Sql host "INSERT INTO customers (name) SELECT 'while-conduit-local-down-' || g FROM generate_series(1,30) g" | Out-Null

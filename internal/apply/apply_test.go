@@ -11,6 +11,29 @@ import (
 	"github.com/MorphEdit/conduit/internal/config"
 )
 
+// A row the local table cannot take must be set aside, never retried
+// forever (that would stop every later change from the same site).
+func TestSchemaMismatchCodes(t *testing.T) {
+	setAside := []string{"42P01", "42703", "42804", "22P02", "23502",
+		"22001",          // varchar too short here
+		"22003",          // numeric out of range
+		"22007", "22008", // bad date/time
+		"23514", // CHECK only on this site
+		"23P01", // exclusion constraint
+	}
+	for _, c := range setAside {
+		if !schemaMismatch(c) {
+			t.Errorf("%s must be set aside", c)
+		}
+	}
+	// Temporary trouble must be retried; unique clashes have their own handling.
+	for _, c := range []string{"40001", "40P01", "53300", "57P01", "08006", "23505"} {
+		if schemaMismatch(c) {
+			t.Errorf("%s must not be set aside", c)
+		}
+	}
+}
+
 func TestSyncableSchemas(t *testing.T) {
 	cfg := &config.Config{Capture: config.CaptureConfig{Schemas: []string{"public", "sales"}}}
 	a := New(cfg, slog.Default())

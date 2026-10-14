@@ -296,7 +296,7 @@ func (a *Applier) applyChange(ctx context.Context, tx pgx.Tx, r *row) error {
 		sp.Rollback(ctx)
 		return a.conflict(ctx, tx, r, kindUnique, "skipped", pgErr.Message+" ("+pgErr.ConstraintName+")")
 	}
-	if errors.As(err, &pgErr) && schemaMismatch[pgErr.Code] {
+	if errors.As(err, &pgErr) && schemaMismatch(pgErr.Code) {
 		// The table here does not look like the sender's. Keep the change in
 		// the conflict log (it can be replayed once the schema is fixed) and
 		// let the rest of the queue through.
@@ -310,14 +310,24 @@ func (a *Applier) applyChange(ctx context.Context, tx pgx.Tx, r *row) error {
 	return sp.Commit(ctx)
 }
 
-// Errors that mean the local table does not match the sender's: missing
-// table or column, wrong type, or a NOT NULL column the sender does not have.
-var schemaMismatch = map[string]bool{
-	"42P01": true, // undefined_table
-	"42703": true, // undefined_column
-	"42804": true, // datatype_mismatch
-	"22P02": true, // invalid_text_representation
-	"23502": true, // not_null_violation
+// schemaMismatch reports errors that mean the local table does not accept a
+// row the sender's table did: missing table or column, wrong type, a NOT
+// NULL or CHECK the sender does not have, a shorter varchar or smaller
+// numeric, an exclusion constraint. Retrying would fail forever and hold up
+// every later change from that site, so the row is set aside instead.
+func schemaMismatch(code string) bool {
+	switch code {
+	case "42P01", // undefined_table
+		"42703", // undefined_column
+		"42804", // datatype_mismatch
+		"23502", // not_null_violation
+		"23514", // check_violation
+		"23P01": // exclusion_violation
+		return true
+	}
+	// Class 22, data exception: invalid_text_representation, string too
+	// long, numeric out of range, bad date/time value, ...
+	return strings.HasPrefix(code, "22")
 }
 
 // ReplaySkipped tries again every change that was skipped for a schema

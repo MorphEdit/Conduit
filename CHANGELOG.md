@@ -17,6 +17,9 @@
   while it stayed deleted on that site. Delete markers are now kept until every active site has caught up
   past them: an idle site tells each peer every minute how far it is caught up. Upgrade every site; until a
   site sends this, the others keep their delete markers
+- Fix: a row the receiving table rejects (a CHECK or exclusion constraint only that site has, a shorter
+  varchar, a smaller numeric, a bad date…) no longer stops every later change from the same site. It is set
+  aside as `schema_mismatch` like a missing column, and **Replay** applies it once the table is fixed
 
 ## v0.3.0 — security and consistency fixes
 
