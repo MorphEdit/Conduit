@@ -23,6 +23,9 @@
 - Fix: two changes to one row committed at exactly the same instant on two sites could leave each site with
   the other's version. Ties are now broken by site id (the higher id wins) for rows, delete markers and
   rows copied to a new site, so every site keeps the same version
+- Security: ten wrong admin passwords from one address lock it out for 15 minutes. A site without an admin
+  password shows its pairing code only on that machine itself (and in its log), no longer to anyone on the
+  LAN. Conduit warns at start when the plain-HTTP dashboard listens on every interface
 
 ## v0.3.0 — security and consistency fixes
 

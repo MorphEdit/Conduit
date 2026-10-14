@@ -430,6 +430,10 @@ $mesh = Invoke-RestMethod "http://127.0.0.1:7420/v1/mesh"
 $localNode = $mesh.nodes | Where-Object id -eq 'local'
 Check (-not $localNode.reachable) 'mesh marks a cut site unreachable'
 HealWan local
+# Guessing the admin password: after 10 wrong tries the address is locked out, even for the right one.
+# (Done on local, which needs no more admin actions in this run.)
+$codes = foreach ($i in 1..10) { Admin local '/v1/admin/replay' "guess-$i" }
+Check (($codes | Select-Object -Last 1) -eq 401 -and (Admin local '/v1/admin/replay') -eq 429) 'admin password guessing is locked out after 10 tries'
 
 # ---------------------------------------------------------------------------
 Section "13. remove a site"

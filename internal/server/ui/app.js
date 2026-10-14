@@ -176,7 +176,10 @@ function renderCluster(m) {
   if (joining) {
     const p = st.pairing || {};
     $('pair-code').textContent = p.code || '— — —';
-    $('show-code').hidden = !p.hidden;
+    $('show-code').hidden = !p.hidden || !st.admin_enabled;
+    // No admin password here: the code is shown only on this machine itself
+    // (or in Conduit's log), never to anyone else on the LAN.
+    $('code-hint').hidden = !p.hidden || st.admin_enabled;
     $('join-title').textContent = st.phase === 'joining' ? (st.notice || 'กำลังเข้าร่วม…') :
       p.status === 'requested' ? `ส่งคำขอไปที่ ${String(p.seed_id || '').toUpperCase()} แล้ว — รออนุมัติ` :
       p.status === 'rejected' ? 'คำขอถูกปฏิเสธ — จะลองใหม่ใน 5 นาที' :
@@ -264,6 +267,7 @@ $('show-code').addEventListener('click', async () => {
   const pw = window.prompt('รหัส admin ของไซต์นี้ (CONDUIT_ADMIN_PASSWORD)');
   if (!pw) return;
   const r = await fetch('v1/admin/check', { headers: { 'X-Admin-Password': pw } }).catch(() => null);
+  if (r && r.status === 429) { alert('ใส่รหัส admin ผิดหลายครั้งเกินไป — รอ 15 นาทีแล้วลองใหม่'); return; }
   if (!r || !r.ok) { alert('รหัส admin ไม่ถูกต้อง'); return; }
   adminPw = pw;
   tick();

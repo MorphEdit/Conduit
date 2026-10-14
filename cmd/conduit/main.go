@@ -16,6 +16,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -96,6 +97,13 @@ func run(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	go func() { serveErr <- httpSrv.ListenAndServe() }()
 	log.Info(buildinfo.String())
 	log.Info("conduit started", "dashboard", cfg.Listen, "peer_port", cfg.PeerListen, "advertise", cfg.Advertise)
+	if host, _, _ := net.SplitHostPort(cfg.Listen); host == "" || host == "0.0.0.0" || host == "::" {
+		log.Warn("the dashboard is plain HTTP on every network interface: keep port " + cfg.Listen +
+			" on your LAN (firewall), put a TLS proxy in front, or set CONDUIT_LISTEN to one address such as 127.0.0.1:7420")
+	}
+	if cfg.AdminPassword == "" {
+		log.Warn("no CONDUIT_ADMIN_PASSWORD: dashboard actions are off, and the pairing code is shown only on this machine and in this log")
+	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()

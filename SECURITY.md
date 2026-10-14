@@ -28,7 +28,9 @@ Security fixes are released for the latest version. Please upgrade before report
 - Postgres passwords are passed to `pg_dump`/`psql` through the environment, never on the command line.
 - Conduit does not change Postgres settings unless an admin allows it (or `CONDUIT_CONFIGURE_POSTGRES=true`).
 - The dashboard (port 7420) is plain HTTP and meant for your LAN. Protect it with
-  `CONDUIT_ADMIN_PASSWORD`, and put a TLS reverse proxy in front if you expose it further.
+  `CONDUIT_ADMIN_PASSWORD`, and put a TLS reverse proxy in front if you expose it further (or set
+  `CONDUIT_LISTEN=127.0.0.1:7420`). Conduit warns at start when it listens on every interface. Ten wrong
+  admin passwords from one address lock that address out for 15 minutes.
 - Invite codes are single-use and expire after 24 hours. Treat them like passwords.
 - LAN joins are proven both ways with the pairing code: it is shown only on the new site's dashboard (only to
   its admin when `CONDUIT_ADMIN_PASSWORD` is set) and never sent over the network itself. The new site sends a
@@ -36,8 +38,9 @@ Security fixes are released for the latest version. Please upgrade before report
   invite only if it matches that request (five wrong codes close the request). The invite works only for that
   site name, and the new site accepts only an approval proven with the code. So a fake site on the LAN can
   neither take over a join nor get itself approved under a real site's name. The dashboard shows each
-  request's IP address. Set an admin password on new sites too; on an untrusted LAN, invite codes are still
-  the safest way in.
+  request's IP address. On a site without an admin password the code is shown only to a browser on that
+  machine itself and in Conduit's log. Set an admin password on new sites too; on an untrusted LAN, invite
+  codes are still the safest way in.
 
 ---
 

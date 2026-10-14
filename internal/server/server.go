@@ -40,13 +40,14 @@ const walWarnBytes = 1 << 30
 var uiFiles embed.FS
 
 type Server struct {
-	cfg *config.Config
-	rt  *node.Runtime
-	log *slog.Logger
+	cfg   *config.Config
+	rt    *node.Runtime
+	log   *slog.Logger
+	guard *limiter
 }
 
 func New(rt *node.Runtime) *Server {
-	return &Server{cfg: rt.Cfg, rt: rt, log: rt.Log.With("component", "server")}
+	return &Server{cfg: rt.Cfg, rt: rt, log: rt.Log.With("component", "server"), guard: newLimiter()}
 }
 
 func health(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) }
@@ -120,10 +121,37 @@ func (s *Server) peerOnly(h func(http.ResponseWriter, *http.Request, string)) ht
 	}
 }
 
-// isAdmin reports whether r may see admin-only status details: it carries the
-// admin password, or this site has none set.
+// isAdmin reports whether r may see admin-only status details (the pairing
+// code): it carries the admin password, or this site has none set and r
+// comes from this machine itself. Without that last rule anyone on the LAN
+// could read a new site's code and get a fake request approved with it.
 func (s *Server) isAdmin(r *http.Request) bool {
-	return s.cfg.AdminPassword == "" || equal(r.Header.Get("X-Admin-Password"), s.cfg.AdminPassword)
+	if s.cfg.AdminPassword == "" {
+		return isLoopback(r)
+	}
+	pw := r.Header.Get("X-Admin-Password")
+	return pw != "" && s.checkPassword(r, pw) == nil
+}
+
+var (
+	errWrongPassword = errors.New("wrong admin password")
+	errLockedOut     = errors.New("too many wrong admin passwords from this address; try again later")
+)
+
+// checkPassword compares pw with the admin password, locking an address
+// out after too many wrong guesses.
+func (s *Server) checkPassword(r *http.Request, pw string) error {
+	ip := remoteIP(r)
+	if s.guard.locked(ip) {
+		return errLockedOut
+	}
+	if !equal(pw, s.cfg.AdminPassword) {
+		s.guard.fail(ip)
+		s.log.Warn("wrong admin password", "from", ip)
+		return errWrongPassword
+	}
+	s.guard.ok(ip)
+	return nil
 }
 
 func (s *Server) admin(h http.HandlerFunc) http.HandlerFunc {
@@ -132,11 +160,14 @@ func (s *Server) admin(h http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "admin actions are off: set CONDUIT_ADMIN_PASSWORD on this site", http.StatusForbidden)
 			return
 		}
-		if !equal(r.Header.Get("X-Admin-Password"), s.cfg.AdminPassword) {
-			http.Error(w, "wrong admin password", http.StatusUnauthorized)
-			return
+		switch err := s.checkPassword(r, r.Header.Get("X-Admin-Password")); err {
+		case nil:
+			h(w, r)
+		case errLockedOut:
+			http.Error(w, err.Error(), http.StatusTooManyRequests)
+		default:
+			http.Error(w, err.Error(), http.StatusUnauthorized)
 		}
-		h(w, r)
 	}
 }
 
