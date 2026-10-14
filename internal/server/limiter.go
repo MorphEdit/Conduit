@@ -79,7 +79,13 @@ func remoteIP(r *http.Request) string {
 	return host
 }
 
+// isLoopback reports whether r comes from a browser on this machine. A
+// request relayed by a reverse proxy on this machine also arrives from
+// loopback, so one carrying forwarding headers does not count.
 func isLoopback(r *http.Request) bool {
+	if r.Header.Get("X-Forwarded-For") != "" || r.Header.Get("Forwarded") != "" || r.Header.Get("X-Real-Ip") != "" {
+		return false
+	}
 	ip := net.ParseIP(remoteIP(r))
 	return ip != nil && ip.IsLoopback()
 }

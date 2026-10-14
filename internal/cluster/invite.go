@@ -73,7 +73,9 @@ func CreateInvite(ctx context.Context, pool *pgxpool.Pool, selfURL, selfFP strin
 }
 
 // CreateInviteFor issues an invite that only the site named forID can redeem
-// (any site if forID is empty), e.g. for an approved LAN join request.
+// (any site if forID is empty), e.g. for an approved LAN join request. The
+// name variant a joining site picks when its name is taken ("<id>_1a2b", see
+// node.redeem) is accepted too; site ids hold no regex characters.
 func CreateInviteFor(ctx context.Context, pool *pgxpool.Pool, selfURL, selfFP string, ttl time.Duration, forID string) (string, time.Time, error) {
 	secret := randomHex(24)
 	expires := time.Now().Add(ttl)
@@ -88,7 +90,8 @@ var ErrBadInvite = errors.New("invite code is invalid, expired or already used")
 func redeem(ctx context.Context, pool *pgxpool.Pool, secret, by string) error {
 	tag, err := pool.Exec(ctx, `
 		UPDATE conduit.invites SET used_at = now(), used_by = $2
-		WHERE secret_hash = $1 AND used_at IS NULL AND expires_at > now() AND (for_id IS NULL OR for_id = $2)`, hashSecret(secret), by)
+		WHERE secret_hash = $1 AND used_at IS NULL AND expires_at > now()
+		  AND (for_id IS NULL OR $2 ~ ('^' || for_id || '(_[0-9a-f]{4})?$'))`, hashSecret(secret), by)
 	if err != nil {
 		return err
 	}

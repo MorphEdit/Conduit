@@ -84,19 +84,20 @@ func TestSiteCannotChangeItsOwnIDSlot(t *testing.T) {
 func TestJoinRequestLimits(t *testing.T) {
 	r := NewRequests()
 	secret := "0123456789abcdef"
+	commit := PairingCommit("111111", HashSecret(secret))
 	for i := 0; i < maxPendingPerIP; i++ {
-		if _, err := r.Add("10.0.0.5", "site"+string(rune('a'+i)), "https://x", "111 111", "", secret); err != nil {
+		if _, err := r.Add("10.0.0.5", "site"+string(rune('a'+i)), "https://x", commit, secret); err != nil {
 			t.Fatalf("request %d from one address refused: %v", i, err)
 		}
 	}
-	if _, err := r.Add("10.0.0.5", "sitez", "https://x", "111 111", "", secret); err != ErrTooMany {
+	if _, err := r.Add("10.0.0.5", "sitez", "https://x", commit, secret); err != ErrTooMany {
 		t.Fatalf("expected ErrTooMany for a 3rd request from the same address, got %v", err)
 	}
-	if _, err := r.Add("10.0.0.9", "real", "https://real", "222 222", "", secret); err != nil {
+	if _, err := r.Add("10.0.0.9", "real", "https://real", commit, secret); err != nil {
 		t.Fatalf("a different address must still get in: %v", err)
 	}
 	// the same site asking again replaces its request instead of piling up
-	if _, err := r.Add("10.0.0.9", "real", "https://real", "333 333", "", secret); err != nil {
+	if _, err := r.Add("10.0.0.9", "real", "https://real", commit, secret); err != nil {
 		t.Fatalf("repeat request refused: %v", err)
 	}
 	if n := len(r.Pending()); n != 3 {

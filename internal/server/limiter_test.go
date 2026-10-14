@@ -52,4 +52,10 @@ func TestLoopbackOnly(t *testing.T) {
 			t.Errorf("isLoopback(%s) = %v, want %v", addr, got, want)
 		}
 	}
+	// A reverse proxy on this machine relays other people's requests.
+	r.RemoteAddr = "127.0.0.1:5000"
+	r.Header.Set("X-Forwarded-For", "192.168.1.20")
+	if isLoopback(r) {
+		t.Error("a proxied request must not count as this machine")
+	}
 }

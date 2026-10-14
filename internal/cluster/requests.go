@@ -13,14 +13,11 @@ import (
 )
 
 // PendingJoin is a site found on the LAN asking to be let in. An admin
-// compares Code with the one shown on the new site, then approves.
+// types the code shown on the new site when approving (see PairingCommit).
 type PendingJoin struct {
-	ID     string `json:"id"`
-	NodeID string `json:"node_id"`
-	URL    string `json:"url"`
-	// Code is only sent by sites older than v0.3; newer ones keep it to
-	// themselves and send a commit to it instead (see PairingCommit).
-	Code      string    `json:"code,omitempty"`
+	ID        string    `json:"id"`
+	NodeID    string    `json:"node_id"`
+	URL       string    `json:"url"`
 	Status    string    `json:"status"` // pending | approved | rejected
 	CreatedAt time.Time `json:"created_at"`
 	From      string    `json:"from"` // requester's IP address
@@ -35,8 +32,10 @@ type PendingJoin struct {
 // ErrCodeMismatch means the typed pairing code is not the one the site sent.
 var ErrCodeMismatch = errors.New("pairing code does not match the one shown on the new site")
 
-// ErrNoPairingProof means a request carries neither a commit nor a code, so
-// nothing could tell it apart from a fake site asking under the same name.
+// ErrNoPairingProof means a request carries no commit to its pairing code
+// (a site older than v0.4), so nothing could tell it apart from a fake site
+// asking under the same name. Sites older than v0.3 sent the code itself,
+// which anyone could read from /status and reuse, so they are refused too.
 var ErrNoPairingProof = errors.New("this site's Conduit is too old for LAN pairing: update it, or join with an invite code")
 
 // Requests holds join requests in memory; a restart simply makes the new
@@ -71,8 +70,8 @@ func (r *Requests) gc() {
 // Add records a request from the given address, replacing any earlier one
 // from the same site. Each address may have only a couple pending, so one
 // machine cannot fill the queue and lock real sites out.
-func (r *Requests) Add(from, nodeID, url, code, commit, secret string) (string, error) {
-	if code == "" && commit == "" {
+func (r *Requests) Add(from, nodeID, url, commit, secret string) (string, error) {
+	if commit == "" {
 		return "", ErrNoPairingProof
 	}
 	r.mu.Lock()
@@ -95,7 +94,7 @@ func (r *Requests) Add(from, nodeID, url, code, commit, secret string) (string, 
 		return "", ErrTooMany
 	}
 	id := randomHex(8)
-	r.m[id] = &PendingJoin{ID: id, NodeID: nodeID, URL: url, Code: code, Status: "pending", CreatedAt: time.Now(),
+	r.m[id] = &PendingJoin{ID: id, NodeID: nodeID, URL: url, Status: "pending", CreatedAt: time.Now(),
 		From: from, secretHash: hashSecret(secret), commit: commit}
 	return id, nil
 }
@@ -118,9 +117,9 @@ func (r *Requests) Poll(id, secret string) (status, invite, proof string, ok boo
 var errNoRequest = errors.New("no such pending request")
 
 // Check validates a typed pairing code before an approval and returns the
-// requesting site's name. Newer sites sent a commit to their code, older
-// ones the code itself; either way only the site showing that code can
-// receive the invite. Too many wrong codes reject the request.
+// requesting site's name: only the site showing that code (the one that sent
+// the matching commit) can receive the invite. Too many wrong codes reject
+// the request.
 func (r *Requests) Check(id, code string) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -141,13 +140,7 @@ func (r *Requests) Check(id, code string) (string, error) {
 }
 
 func (p *PendingJoin) matches(code string) bool {
-	switch {
-	case p.commit != "":
-		return CommitMatches(p.commit, code, p.secretHash)
-	case p.Code != "":
-		return len(NormalizeCode(code)) == 6 && NormalizeCode(p.Code) == NormalizeCode(code)
-	}
-	return false
+	return CommitMatches(p.commit, code, p.secretHash)
 }
 
 // Approve hands the request its invite, with the proof that the approving

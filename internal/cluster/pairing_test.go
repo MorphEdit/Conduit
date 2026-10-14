@@ -52,7 +52,7 @@ func TestPairingCommit(t *testing.T) {
 func TestRequestsApproveWithCode(t *testing.T) {
 	const secret = "0123456789abcdef"
 	r := NewRequests()
-	id, err := r.Add("10.0.0.5", "branch", "https://branch:7443", "", PairingCommit("654321", HashSecret(secret)), secret)
+	id, err := r.Add("10.0.0.5", "branch", "https://branch:7443", PairingCommit("654321", HashSecret(secret)), secret)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,18 +77,9 @@ func TestRequestsApproveWithCode(t *testing.T) {
 		t.Fatalf("poll = %q %q %q %v", status, invite, proof, ok)
 	}
 
-	// A site older than v0.3 still sends its code: a typo is caught here.
-	old, _ := r.Add("10.0.0.6", "office", "https://office:7443", "111 222", "", "fedcba9876543210")
-	if _, err := r.Check(old, "111223"); !errors.Is(err, ErrCodeMismatch) {
-		t.Errorf("mismatched legacy code: got %v", err)
-	}
-	if _, err := r.Check(old, "111222"); err != nil {
-		t.Errorf("matching legacy code: %v", err)
-	}
-
-	// v0.3.0 sent neither: nothing could tell it from a fake site.
-	if _, err := r.Add("10.0.0.7", "shop", "https://shop:7443", "", "", "aaaaaaaaaaaaaaaa"); !errors.Is(err, ErrNoPairingProof) {
-		t.Errorf("request without code or commit: got %v", err)
+	// Older sites sent no commit: nothing could tell them from a fake site.
+	if _, err := r.Add("10.0.0.7", "shop", "https://shop:7443", "", "aaaaaaaaaaaaaaaa"); !errors.Is(err, ErrNoPairingProof) {
+		t.Errorf("request without a commit: got %v", err)
 	}
 }
 
@@ -98,8 +89,8 @@ func TestRequestsApproveWithCode(t *testing.T) {
 func TestFakeSiteSameNameGetsNoInvite(t *testing.T) {
 	const realSecret, fakeSecret = "real-secret-0123456789", "fake-secret-0123456789"
 	r := NewRequests()
-	fake, _ := r.Add("10.0.0.66", "branch", "https://evil:7443", "", PairingCommit("000000", HashSecret(fakeSecret)), fakeSecret)
-	real, _ := r.Add("10.0.0.5", "branch", "https://branch:7443", "", PairingCommit("482915", HashSecret(realSecret)), realSecret)
+	fake, _ := r.Add("10.0.0.66", "branch", "https://evil:7443", PairingCommit("000000", HashSecret(fakeSecret)), fakeSecret)
+	real, _ := r.Add("10.0.0.5", "branch", "https://branch:7443", PairingCommit("482915", HashSecret(realSecret)), realSecret)
 
 	if _, err := r.Check(fake, "482915"); !errors.Is(err, ErrCodeMismatch) {
 		t.Fatalf("fake request accepted the real site's code: %v", err)
@@ -118,7 +109,7 @@ func TestFakeSiteSameNameGetsNoInvite(t *testing.T) {
 func TestRequestRejectedAfterTooManyWrongCodes(t *testing.T) {
 	const secret = "0123456789abcdef"
 	r := NewRequests()
-	id, _ := r.Add("10.0.0.5", "branch", "https://branch:7443", "", PairingCommit("654321", HashSecret(secret)), secret)
+	id, _ := r.Add("10.0.0.5", "branch", "https://branch:7443", PairingCommit("654321", HashSecret(secret)), secret)
 	for i := 0; i < maxCodeMisses; i++ {
 		r.Check(id, "000000")
 	}

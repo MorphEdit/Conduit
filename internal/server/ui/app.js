@@ -197,7 +197,7 @@ function renderCluster(m) {
   const reqs = m.requests || [];
   $('requests').hidden = reqs.length === 0;
   $('request-rows').innerHTML = reqs.map(r => `<li>
-    <span class="rq-name">${esc(r.node_id)}</span>${r.code ? `<span class="rq-code">${esc(r.code)}</span>` : ''}
+    <span class="rq-name">${esc(r.node_id)}</span>
     <span class="rq-actions">${demo ? '<span class="muted">ตัวอย่าง</span>' : r.holder === m.self
       ? `<button class="btn primary" type="button" data-approve="${esc(r.id)}" data-name="${esc(r.node_id)}" data-from="${esc(r.from || '')}">อนุมัติ</button><button class="btn danger" type="button" data-reject="${esc(r.id)}">ปฏิเสธ</button>`
       : `<span class="muted">อนุมัติที่ dashboard ของ ${esc(r.holder).toUpperCase()}</span>`}</span>
