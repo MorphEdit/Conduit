@@ -23,7 +23,8 @@ exactly as before — no code changes. Conduit reads what changed and delivers i
 ## Features
 
 - **Works offline** — each site writes locally; changes queue up and are delivered when the link returns.
-- **Multi-site, every direction** — host ⇄ office ⇄ branch; any site can write.
+- **Multi-site, every direction** — host, office and branches all write, and each site sends its changes
+  straight to every other site.
 - **Conflict handling** — last write wins by commit time, delete/update races handled with tombstones,
   every conflict recorded for review.
 - **Owner-only tables** — mark tables (stock, ledger, payroll…) as writable on one site only.
@@ -133,12 +134,15 @@ More (owner-only tables, retention…) in [docs/configuration.md](docs/configura
 - Every table needs a primary key; the schema must be the same on every site
   (new, empty sites get it copied automatically — needs `pg_dump`/`psql` 16, included in the Docker image)
 - Clocks in sync (NTP)
+- Every site must be able to reach every other site on port 7443 (a full mesh): a site only sends its
+  own changes and never relays another site's, so if branch can reach office but not host, branch
+  will not get host's changes until it can reach host itself
 
 ## Ports
 
 | Port | Purpose | Open to |
 |---|---|---|
-| `7443/tcp` | Sites talk to each other (HTTPS) | Other sites — safe to expose to the internet |
+| `7443/tcp` | Sites talk to each other (HTTPS) | Every other site — safe to expose to the internet |
 | `7420/tcp` | Dashboard + admin actions (HTTP) | Your LAN only, or put a TLS reverse proxy in front |
 | `7420/udp` | LAN discovery | Your LAN only |
 
