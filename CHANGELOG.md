@@ -29,6 +29,9 @@
 - Security: a member learns a new site only from the site that hands out id slots or from the new site
   itself, so one member can no longer invent members with credentials of its own; the cluster's id step
   can no longer be changed through gossip
+- The dashboard warns when another site's clock is 2 seconds or more off (conflicts are decided by commit
+  time, so a clock that runs ahead wins them all)
+- Docs: every site must reach every other site directly (full mesh); a site never relays another's changes
 
 ## v0.3.0 — security and consistency fixes
 

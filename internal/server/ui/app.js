@@ -23,6 +23,7 @@ const WAL_WARN = 1 << 30;
 
 let mesh = null, selected = null, demo = false, everLive = false, adminPw = null;
 let paused = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+const clockWarnMs = 2000; // warn when another site's clock is this far from ours
 
 // ---------- model ----------
 // Order = this site first, then peers as the server lists them; offsets are
@@ -33,7 +34,7 @@ function normalize(m) {
     const st = n.status || {};
     if (st.sequences) known[n.id] = st.sequences;
     const sq = known[n.id];
-    return { id: n.id, self: !!n.self, up: !!n.reachable, st, idx: i, offset: sq ? sq.offset : null, step: sq ? sq.step : null };
+    return { id: n.id, self: !!n.self, up: !!n.reachable, st, idx: i, offset: sq ? sq.offset : null, step: sq ? sq.step : null, skew: n.skew_ms || 0 };
   });
   const byId = Object.fromEntries(nodes.map(n => [n.id, n]));
   const rank = { ok: 0, busy: 1, warn: 2, down: 3 };
@@ -159,9 +160,14 @@ function renderCluster(m) {
   const self = m.byId[m.self], st = self ? self.st : {};
   const running = !st.phase || st.phase === 'running';
   const skipped = st.schema_skipped || 0;
+  // Conflicts are decided by commit time: a clock that runs ahead wins them all.
+  const skewed = m.nodes.filter(n => Math.abs(n.skew) >= clockWarnMs)
+    .map(n => `${n.id.toUpperCase()} ${n.skew > 0 ? 'เร็วกว่า' : 'ช้ากว่า'} ${(Math.abs(n.skew) / 1000).toFixed(1)} วินาที`);
+  const clockMsg = skewed.length ? `นาฬิกาไม่ตรงกับไซต์นี้: ${skewed.join(', ')} — ตั้ง NTP ให้ทุกเครื่อง ไม่อย่างนั้นการตัดสิน conflict จะเพี้ยน` : '';
   const msg = st.removed ? 'ไซต์นี้ถูกถอดออกจากเครือข่ายแล้ว — หยุดซิงก์' :
     st.warning || st.wal_warning || st.notice || (!running && st.error) ||
-    (skipped ? `ข้ามข้อมูลไป ${skipped} รายการเพราะโครงสร้างตารางของไซต์นี้ไม่ตรงกับไซต์อื่น — แก้ตารางให้ตรงกันแล้วกดลองใหม่ (ข้อมูลไม่หาย)` : '');
+    (skipped ? `ข้ามข้อมูลไป ${skipped} รายการเพราะโครงสร้างตารางของไซต์นี้ไม่ตรงกับไซต์อื่น — แก้ตารางให้ตรงกันแล้วกดลองใหม่ (ข้อมูลไม่หาย)` : '') ||
+    clockMsg;
   const banner = $('banner');
   banner.hidden = !msg || demo || st.phase === 'joining';
   $('banner-text').textContent = msg;

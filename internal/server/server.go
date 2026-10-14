@@ -328,6 +328,24 @@ type meshNode struct {
 	Reachable bool           `json:"reachable"`
 	Error     string         `json:"error,omitempty"`
 	Status    map[string]any `json:"status,omitempty"`
+	// SkewMS is how far the site's clock is ahead of ours (negative: behind),
+	// beyond what the request's round trip could explain.
+	SkewMS int64 `json:"skew_ms,omitempty"`
+}
+
+// clockSkew estimates how far a peer's clock (remote, read during the
+// request) is from ours, given when the request started and ended. Up to half
+// the round trip could be travel time, so only the excess counts.
+func clockSkew(remote, start, end time.Time) time.Duration {
+	half := end.Sub(start) / 2
+	d := remote.Sub(start.Add(half))
+	switch {
+	case d > half:
+		return d - half
+	case d < -half:
+		return d + half
+	}
+	return 0
 }
 
 // mesh returns this site's status plus every active member's, fetched in
@@ -353,6 +371,7 @@ func (s *Server) mesh(w http.ResponseWriter, r *http.Request) {
 		go func() {
 			defer wg.Done()
 			n := &nodes[i]
+			start := time.Now()
 			resp, err := peer.Do(r.Context(), targets[i-1], creds, http.MethodGet, "/status", nil, 2*time.Second)
 			if err == nil && resp.StatusCode != http.StatusOK {
 				resp.Body.Close()
@@ -362,8 +381,14 @@ func (s *Server) mesh(w http.ResponseWriter, r *http.Request) {
 				var st map[string]any
 				err = json.NewDecoder(resp.Body).Decode(&st)
 				resp.Body.Close()
+				end := time.Now()
 				if err == nil {
 					n.Status = st
+					if s, ok := st["time"].(string); ok {
+						if t, perr := time.Parse(time.RFC3339Nano, s); perr == nil {
+							n.SkewMS = clockSkew(t, start, end).Milliseconds()
+						}
+					}
 				}
 			}
 			if err != nil {
