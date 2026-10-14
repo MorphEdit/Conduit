@@ -190,9 +190,9 @@ function renderCluster(m) {
   $('request-rows').innerHTML = reqs.map(r => `<li>
     <span class="rq-name">${esc(r.node_id)}</span>${r.code ? `<span class="rq-code">${esc(r.code)}</span>` : ''}
     <span class="rq-actions">${demo ? '<span class="muted">ตัวอย่าง</span>' : r.holder === m.self
-      ? `<button class="btn primary" type="button" data-approve="${esc(r.id)}" data-name="${esc(r.node_id)}">อนุมัติ</button><button class="btn danger" type="button" data-reject="${esc(r.id)}">ปฏิเสธ</button>`
+      ? `<button class="btn primary" type="button" data-approve="${esc(r.id)}" data-name="${esc(r.node_id)}" data-from="${esc(r.from || '')}">อนุมัติ</button><button class="btn danger" type="button" data-reject="${esc(r.id)}">ปฏิเสธ</button>`
       : `<span class="muted">อนุมัติที่ dashboard ของ ${esc(r.holder).toUpperCase()}</span>`}</span>
-    <span class="rq-meta">${esc(r.url)} · ${rel(r.created_at)}</span></li>`).join('');
+    <span class="rq-meta">${esc(r.url)}${r.from ? ` · IP ${esc(r.from)}` : ''} · ${rel(r.created_at)}</span></li>`).join('');
   $('attention').hidden = banner.hidden && $('requests').hidden && $('invite-box').hidden;
 
   const sel = m.byId[selected];
@@ -250,9 +250,10 @@ document.addEventListener('click', async e => {
   const id = a.dataset.approve || a.dataset.reject;
   let body;
   if (a.dataset.approve) {
-    // The code is shown only on the new site's own screen; typing it here
-    // proves to the new site that this approval is genuine.
-    const code = window.prompt(`พิมพ์รหัสจับคู่ 6 หลักที่แสดงบนหน้าจอของ ${a.dataset.name.toUpperCase()}`);
+    // The code is shown only on the new site's own screen. Typing it here
+    // proves both ways that this approval goes to that very site.
+    const from = a.dataset.from ? ` (คำขอมาจาก IP ${a.dataset.from})` : '';
+    const code = window.prompt(`พิมพ์รหัสจับคู่ 6 หลักที่แสดงบนหน้าจอของ ${a.dataset.name.toUpperCase()}${from}`);
     if (code === null) return;
     body = { code };
   } else if (!confirm('ปฏิเสธคำขอนี้?')) return;

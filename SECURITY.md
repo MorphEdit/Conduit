@@ -30,10 +30,13 @@ Security fixes are released for the latest version. Please upgrade before report
 - The dashboard (port 7420) is plain HTTP and meant for your LAN. Protect it with
   `CONDUIT_ADMIN_PASSWORD`, and put a TLS reverse proxy in front if you expose it further.
 - Invite codes are single-use and expire after 24 hours. Treat them like passwords.
-- LAN joins are proven with the pairing code: it is shown only on the new site's dashboard (only to its admin
-  when `CONDUIT_ADMIN_PASSWORD` is set) and never sent over the network. The admin types it when approving,
-  and the new site accepts only an approval proven with it, so a fake site answering on the LAN cannot
-  take over the join. Set an admin password on new sites too; on an untrusted LAN, invite codes are still
+- LAN joins are proven both ways with the pairing code: it is shown only on the new site's dashboard (only to
+  its admin when `CONDUIT_ADMIN_PASSWORD` is set) and never sent over the network itself. The new site sends a
+  commitment to it with its request; the admin types the code when approving, and the approving site makes an
+  invite only if it matches that request (five wrong codes close the request). The invite works only for that
+  site name, and the new site accepts only an approval proven with the code. So a fake site on the LAN can
+  neither take over a join nor get itself approved under a real site's name. The dashboard shows each
+  request's IP address. Set an admin password on new sites too; on an untrusted LAN, invite codes are still
   the safest way in.
 
 ---

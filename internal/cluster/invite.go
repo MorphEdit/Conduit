@@ -69,9 +69,16 @@ func secretMatches(secret, hash string) bool {
 // CreateInvite issues a one-time code that lets one new site join through
 // this site. It stays valid for ttl.
 func CreateInvite(ctx context.Context, pool *pgxpool.Pool, selfURL, selfFP string, ttl time.Duration) (string, time.Time, error) {
+	return CreateInviteFor(ctx, pool, selfURL, selfFP, ttl, "")
+}
+
+// CreateInviteFor issues an invite that only the site named forID can redeem
+// (any site if forID is empty), e.g. for an approved LAN join request.
+func CreateInviteFor(ctx context.Context, pool *pgxpool.Pool, selfURL, selfFP string, ttl time.Duration, forID string) (string, time.Time, error) {
 	secret := randomHex(24)
 	expires := time.Now().Add(ttl)
-	_, err := pool.Exec(ctx, `INSERT INTO conduit.invites (secret_hash, expires_at) VALUES ($1, $2)`, hashSecret(secret), expires)
+	_, err := pool.Exec(ctx, `INSERT INTO conduit.invites (secret_hash, expires_at, for_id) VALUES ($1, $2, nullif($3, ''))`,
+		hashSecret(secret), expires, forID)
 	return Invite{URL: selfURL, Secret: secret, Fingerprint: selfFP}.Encode(), expires, err
 }
 
@@ -81,7 +88,7 @@ var ErrBadInvite = errors.New("invite code is invalid, expired or already used")
 func redeem(ctx context.Context, pool *pgxpool.Pool, secret, by string) error {
 	tag, err := pool.Exec(ctx, `
 		UPDATE conduit.invites SET used_at = now(), used_by = $2
-		WHERE secret_hash = $1 AND used_at IS NULL AND expires_at > now()`, hashSecret(secret), by)
+		WHERE secret_hash = $1 AND used_at IS NULL AND expires_at > now() AND (for_id IS NULL OR for_id = $2)`, hashSecret(secret), by)
 	if err != nil {
 		return err
 	}

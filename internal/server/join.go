@@ -64,20 +64,25 @@ func (s *Server) joinRequest(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		NodeID string `json:"node_id"`
 		URL    string `json:"url"`
-		Code   string `json:"code"`
+		Code   string `json:"code"`   // sites older than v0.3
+		Commit string `json:"commit"` // see cluster.PairingCommit
 		Secret string `json:"secret"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12)).Decode(&body); err != nil ||
-		!config.ValidID(body.NodeID) || body.URL == "" || len(body.Code) > 16 || len(body.Secret) < 16 {
+		!config.ValidID(body.NodeID) || body.URL == "" || len(body.Code) > 16 || len(body.Commit) > 128 || len(body.Secret) < 16 {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	id, err := s.rt.Requests.Add(host, body.NodeID, body.URL, body.Code, body.Secret)
-	if err != nil {
+	id, err := s.rt.Requests.Add(host, body.NodeID, body.URL, body.Code, body.Commit, body.Secret)
+	switch {
+	case errors.Is(err, cluster.ErrNoPairingProof):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	case err != nil:
 		http.Error(w, err.Error(), http.StatusTooManyRequests)
 		return
 	}
-	s.log.Info("join request waiting for approval", "site", body.NodeID, "code", body.Code)
+	s.log.Info("join request waiting for approval", "site", body.NodeID, "from", host)
 	writeJSON(w, map[string]string{"request_id": id})
 }
 
@@ -163,17 +168,19 @@ func (s *Server) decide(w http.ResponseWriter, r *http.Request) {
 	var err error
 	switch decision {
 	case "approve":
-		// The admin types the pairing code shown on the new site; the new
+		// The admin types the pairing code shown on the new site. It must
+		// match the request's commit before any invite is made, and the new
 		// site only accepts an approval proven with it.
 		var body struct {
 			Code string `json:"code"`
 		}
 		json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10)).Decode(&body)
-		if err = s.rt.Requests.Check(id, body.Code); err != nil {
+		var site string
+		if site, err = s.rt.Requests.Check(id, body.Code); err != nil {
 			break
 		}
 		var invite string
-		if invite, _, err = cluster.CreateInvite(r.Context(), v.Store.Pool(), s.cfg.Advertise, v.TLS.Fingerprint, time.Hour); err == nil {
+		if invite, _, err = cluster.CreateInviteFor(r.Context(), v.Store.Pool(), s.cfg.Advertise, v.TLS.Fingerprint, time.Hour, site); err == nil {
 			err = s.rt.Requests.Approve(id, body.Code, invite, v.TLS.Fingerprint)
 		}
 	case "reject":

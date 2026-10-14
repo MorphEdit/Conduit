@@ -126,6 +126,8 @@ var bootstrapSQL = []string{
 		used_at     TIMESTAMPTZ,
 		used_by     TEXT
 	)`,
+	// An invite handed out for an approved LAN join request works only for that site.
+	`ALTER TABLE conduit.invites ADD COLUMN IF NOT EXISTS for_id TEXT`,
 	// Rejects writes to tables owned by another node. Apply sessions run with
 	// session_replication_role = replica, where this trigger does not fire.
 	`CREATE OR REPLACE FUNCTION conduit.owner_guard() RETURNS trigger LANGUAGE plpgsql AS $$

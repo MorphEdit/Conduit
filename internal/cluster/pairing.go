@@ -12,11 +12,17 @@ import (
 )
 
 // LAN pairing. A site waiting to join shows a 6-digit code on its own
-// dashboard and never sends it anywhere. The admin types that code on the
-// approving site, which returns PairingProof with the invite. The new site
-// accepts the invite only if the proof matches, so a fake site that
-// answered the LAN broadcast cannot approve the join (it never saw the code),
-// and an approval cannot be replayed to another request, site or invite.
+// dashboard and never sends the code itself anywhere. The proof works both
+// ways:
+//
+//   - The new site sends PairingCommit with its request. The approving site
+//     checks the code the admin types against it and hands out an invite only
+//     if it matches, so a fake site on the LAN that asks to join under a real
+//     site's name gets nothing (it never saw the code shown on the real one).
+//   - The approving site returns PairingProof with the invite. The new site
+//     accepts the invite only if the proof matches, so a fake site that
+//     answered the LAN broadcast cannot approve the join, and an approval
+//     cannot be replayed to another request, site or invite.
 
 // NormalizeCode keeps only the digits of a typed pairing code.
 func NormalizeCode(s string) string {
@@ -35,6 +41,24 @@ func PairingProof(code, requestID, seedFP, invite string) string {
 	m := hmac.New(sha256.New, []byte(NormalizeCode(code)))
 	m.Write([]byte("conduit-pair-v1|" + requestID + "|" + strings.ToLower(seedFP) + "|" + invite))
 	return hex.EncodeToString(m.Sum(nil))
+}
+
+// PairingCommit binds a join request to the code shown on the requesting
+// site. It is keyed by the hash of the request's secret, which only the
+// approving site holds, and is kept in that site's memory only: six digits
+// are easy to guess offline, so it must never be shown or logged.
+func PairingCommit(code, secretHash string) string {
+	m := hmac.New(sha256.New, []byte(NormalizeCode(code)))
+	m.Write([]byte("conduit-commit-v1|" + secretHash))
+	return hex.EncodeToString(m.Sum(nil))
+}
+
+// CommitMatches checks the code an admin typed against a request's commit.
+func CommitMatches(commit, code, secretHash string) bool {
+	if commit == "" || len(NormalizeCode(code)) != 6 {
+		return false
+	}
+	return hmac.Equal([]byte(commit), []byte(PairingCommit(code, secretHash)))
 }
 
 // ProofMatches checks an approval received by the site waiting to join.

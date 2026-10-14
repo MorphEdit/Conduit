@@ -8,6 +8,11 @@
 - three.js r170 (MIT) is bundled in the binary, so the dashboard keeps working on a LAN without internet;
   the dashboard no longer loads web fonts either
 - Sample data shows only with `?demo`, never in place of a site that cannot be reached
+- Security: LAN pairing is now proven on the approving site too. A new site sends a commitment to its code;
+  an approval with any other code is refused before an invite is made, so a fake site asking under a real
+  site's name gets nothing. The invite works only for that site name, five wrong codes close the request,
+  and the dashboard shows each request's IP. Sites on v0.3.0 must be updated (or use an invite) to join over
+  the LAN
 
 ## v0.3.0 — security and consistency fixes
 

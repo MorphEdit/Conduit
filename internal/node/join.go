@@ -71,7 +71,7 @@ func (r *Runtime) join(ctx context.Context, st *store.Store) (*cluster.Identity,
 			if reqID == "" {
 				if b, ok := lan.Best(); ok && b.FP != "" {
 					t := peer.Target{URL: b.URL, Fingerprint: b.FP}
-					if id, err := r.requestJoin(ctx, t, reqSecret); err == nil {
+					if id, err := r.requestJoin(ctx, t, r.View().Pairing.Code, reqSecret); err == nil {
 						reqID, seed = id, t
 						r.set(func() { pairing.SeedID, pairing.Status = b.ID, "requested" })
 						r.Log.Info("asked to join; approve it on the dashboard", "site", b.ID, "pairing_code", pairing.Code)
@@ -112,9 +112,11 @@ func (r *Runtime) join(ctx context.Context, st *store.Store) (*cluster.Identity,
 }
 
 // requestJoin asks a site found on the LAN to let this one in. The pairing
-// code is deliberately not sent: the approving admin types it instead.
-func (r *Runtime) requestJoin(ctx context.Context, seed peer.Target, secret string) (string, error) {
-	body, _ := json.Marshal(map[string]string{"node_id": r.Cfg.NodeID, "url": r.Cfg.Advertise, "secret": secret})
+// code itself is deliberately not sent: the approving admin types it, and the
+// commit lets that site check it before handing out an invite.
+func (r *Runtime) requestJoin(ctx context.Context, seed peer.Target, code, secret string) (string, error) {
+	body, _ := json.Marshal(map[string]string{"node_id": r.Cfg.NodeID, "url": r.Cfg.Advertise, "secret": secret,
+		"commit": cluster.PairingCommit(code, cluster.HashSecret(secret))})
 	var out struct {
 		RequestID string `json:"request_id"`
 	}
