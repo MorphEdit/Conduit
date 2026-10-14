@@ -58,6 +58,7 @@ func (a *Applier) applyFast(ctx context.Context, tx pgx.Tx, origin string, at ti
 		rows[i] = r
 	}
 	ts := lit(ptr(at.Format(time.RFC3339Nano))) + "::timestamptz"
+	from, self := lit(&origin), lit(&a.cfg.NodeID)
 
 	// 1. lock the rows that exist, then read every row's state
 	var q strings.Builder
@@ -82,11 +83,11 @@ func (a *Applier) applyFast(ctx context.Context, tx pgx.Tx, origin string, at ti
 		}
 		fmt.Fprintf(&q, `SELECT %d, CASE
 			WHEN EXISTS (SELECT 1 FROM %[2]s WHERE %[3]s) THEN
-				CASE WHEN (SELECT coalesce(pg_xact_commit_timestamp(xmin), '-infinity') > %[4]s FROM %[2]s WHERE %[3]s) THEN %[5]d ELSE %[6]d END
-			WHEN EXISTS (SELECT 1 FROM conduit.tombstones WHERE schema_name = %[7]s AND table_name = %[8]s AND pk = %[9]s AND deleted_at > %[4]s) THEN %[10]d
+				CASE WHEN (SELECT conduit.local_newer(xmin, %[4]s, %[12]s, %[13]s) FROM %[2]s WHERE %[3]s) THEN %[5]d ELSE %[6]d END
+			WHEN EXISTS (SELECT 1 FROM conduit.tombstones WHERE schema_name = %[7]s AND table_name = %[8]s AND pk = %[9]s AND (deleted_at, origin) > (%[4]s, %[12]s::text)) THEN %[10]d
 			ELSE %[11]d END`,
 			i, r.table(), cond, ts, stLocalNewer, stOlder,
-			lit(&r.ch.Schema), lit(&r.ch.Table), lit(ptr(r.pk())), stDeletedLater, stMissing)
+			lit(&r.ch.Schema), lit(&r.ch.Table), lit(ptr(r.pk())), stDeletedLater, stMissing, from, self)
 	}
 	sp, err := tx.Begin(ctx)
 	if err != nil {
@@ -128,9 +129,10 @@ func (a *Applier) applyFast(ctx context.Context, tx pgx.Tx, origin string, at ti
 			if st == stOlder {
 				fmt.Fprintf(&w, "DELETE FROM %s WHERE %s;\n", r.table(), where(la, keys))
 			}
-			fmt.Fprintf(&w, `INSERT INTO conduit.tombstones (schema_name, table_name, pk, deleted_at) VALUES (%s, %s, %s, %s)
-				ON CONFLICT (schema_name, table_name, pk) DO UPDATE SET deleted_at = greatest(conduit.tombstones.deleted_at, EXCLUDED.deleted_at);`+"\n",
-				lit(&r.ch.Schema), lit(&r.ch.Table), lit(ptr(r.pk())), ts)
+			fmt.Fprintf(&w, `INSERT INTO conduit.tombstones (schema_name, table_name, pk, deleted_at, origin) VALUES (%s, %s, %s, %s, %s)
+				ON CONFLICT (schema_name, table_name, pk) DO UPDATE SET deleted_at = EXCLUDED.deleted_at, origin = EXCLUDED.origin
+				WHERE (conduit.tombstones.deleted_at, conduit.tombstones.origin) < (EXCLUDED.deleted_at, EXCLUDED.origin);`+"\n",
+				lit(&r.ch.Schema), lit(&r.ch.Table), lit(ptr(r.pk())), ts, from)
 		case st == stLocalNewer:
 			conflict(r, kindUpdateUpdate, "kept_local", "local row was modified later")
 		case st == stDeletedLater:

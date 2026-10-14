@@ -414,26 +414,27 @@ func (a *Applier) ReplaySkipped(ctx context.Context) (replayed, failed int, err 
 }
 
 // localNewer reports whether the row exists locally and whether its last
-// commit is newer than the remote change. Rows written before
-// track_commit_timestamp was enabled count as oldest.
-func localNewer(ctx context.Context, tx pgx.Tx, r *row, keys []change.Column) (exists, newer bool, err error) {
-	var a args
-	ts := a.addText(r.at.Format(time.RFC3339Nano))
-	sql := fmt.Sprintf(`SELECT coalesce(pg_xact_commit_timestamp(xmin), '-infinity') > %s::timestamptz FROM %s WHERE %s FOR UPDATE`,
-		ts, r.table(), where(&a, keys))
-	err = tx.QueryRow(ctx, sql, a.params()...).Scan(&newer)
+// commit is newer than the remote change (see conduit.local_newer: equal
+// commit times are broken by site id).
+func (a *Applier) localNewer(ctx context.Context, tx pgx.Tx, r *row, keys []change.Column) (exists, newer bool, err error) {
+	var ar args
+	ts, origin, self := ar.addText(r.at.Format(time.RFC3339Nano)), ar.addText(r.origin), ar.addText(a.cfg.NodeID)
+	sql := fmt.Sprintf(`SELECT conduit.local_newer(xmin, %s::timestamptz, %s, %s) FROM %s WHERE %s FOR UPDATE`,
+		ts, origin, self, r.table(), where(&ar, keys))
+	err = tx.QueryRow(ctx, sql, ar.params()...).Scan(&newer)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, false, nil
 	}
 	return err == nil, newer, err
 }
 
-// deletedAfter reports whether a tombstone newer than the remote change exists.
+// deletedAfter reports whether a tombstone newer than the remote change
+// exists (later time, or the same time from a site with a higher id).
 func deletedAfter(ctx context.Context, tx pgx.Tx, r *row) (bool, error) {
 	var newer bool
 	err := tx.QueryRow(ctx,
-		`SELECT deleted_at > $4 FROM conduit.tombstones WHERE schema_name = $1 AND table_name = $2 AND pk = $3`,
-		r.ch.Schema, r.ch.Table, r.pk(), r.at).Scan(&newer)
+		`SELECT (deleted_at, origin) > ($4::timestamptz, $5::text) FROM conduit.tombstones WHERE schema_name = $1 AND table_name = $2 AND pk = $3`,
+		r.ch.Schema, r.ch.Table, r.pk(), r.at, r.origin).Scan(&newer)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -442,7 +443,7 @@ func deletedAfter(ctx context.Context, tx pgx.Tx, r *row) (bool, error) {
 
 func (a *Applier) upsert(ctx context.Context, sp, tx pgx.Tx, r *row) error {
 	keys := r.ch.RowKey()
-	exists, newer, err := localNewer(ctx, sp, r, keys)
+	exists, newer, err := a.localNewer(ctx, sp, r, keys)
 	if err != nil {
 		return err
 	}
@@ -469,7 +470,7 @@ func (a *Applier) remove(ctx context.Context, sp, tx pgx.Tx, r *row) error {
 	if len(keys) == 0 {
 		return fmt.Errorf("delete without key columns")
 	}
-	exists, newer, err := localNewer(ctx, sp, r, keys)
+	exists, newer, err := a.localNewer(ctx, sp, r, keys)
 	if err != nil {
 		return err
 	}
@@ -482,7 +483,7 @@ func (a *Applier) remove(ctx context.Context, sp, tx pgx.Tx, r *row) error {
 			return err
 		}
 	}
-	return store.AddTombstone(ctx, sp, r.ch.Schema, r.ch.Table, r.pk(), r.at)
+	return store.AddTombstone(ctx, sp, store.Tombstone{Schema: r.ch.Schema, Table: r.ch.Table, PK: r.pk(), At: r.at, Origin: r.origin})
 }
 
 func (a *Applier) conflict(ctx context.Context, tx pgx.Tx, r *row, kind, resolution, detail string) error {
@@ -693,7 +694,7 @@ func (a *Applier) ApplyTombstones(ctx context.Context, origin string, ts []store
 		if !a.Syncable(t.Schema) {
 			continue
 		}
-		if err := store.AddTombstone(ctx, tx, t.Schema, t.Table, t.PK, t.At); err != nil {
+		if err := store.AddTombstone(ctx, tx, t); err != nil {
 			return err
 		}
 	}

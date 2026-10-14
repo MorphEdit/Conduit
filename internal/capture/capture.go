@@ -46,6 +46,7 @@ type Status struct {
 type Capture struct {
 	cfg   config.CaptureConfig
 	dsn   string
+	self  string // this site's id, recorded on local delete markers
 	store *store.Store
 	bus   *notify.Bus
 	log   *slog.Logger
@@ -60,6 +61,7 @@ func New(cfg *config.Config, st *store.Store, bus *notify.Bus, log *slog.Logger)
 	return &Capture{
 		cfg:   cfg.Capture,
 		dsn:   cfg.Database,
+		self:  cfg.NodeID,
 		store: st,
 		bus:   bus,
 		log:   log.With("component", "capture"),
@@ -187,7 +189,7 @@ func (c *Capture) stream(ctx context.Context) error {
 	// flush writes the changes collected so far as one part of the current
 	// transaction. The (lsn, part) key makes a replay after a crash harmless.
 	flush := func(final bool) error {
-		if err := c.store.AppendOutbox(ctx, txLSN, part, final, txTime, pending); err != nil {
+		if err := c.store.AppendOutbox(ctx, c.self, txLSN, part, final, txTime, pending); err != nil {
 			return fmt.Errorf("append outbox: %w", err)
 		}
 		part++

@@ -20,6 +20,9 @@
 - Fix: a row the receiving table rejects (a CHECK or exclusion constraint only that site has, a shorter
   varchar, a smaller numeric, a bad date…) no longer stops every later change from the same site. It is set
   aside as `schema_mismatch` like a missing column, and **Replay** applies it once the table is fixed
+- Fix: two changes to one row committed at exactly the same instant on two sites could leave each site with
+  the other's version. Ties are now broken by site id (the higher id wins) for rows, delete markers and
+  rows copied to a new site, so every site keeps the same version
 
 ## v0.3.0 — security and consistency fixes
 

@@ -214,6 +214,11 @@ AssertSynced 'converged after concurrent edits'
 $final = Sql host "SELECT name FROM customers WHERE code = 'C-X'"
 Check ($final -eq 'edited on local (later)') "later edit won everywhere ('$final')"
 Check ((ConflictCount local 'update_update') -gt $before) 'conflict recorded on local (older host edit skipped)'
+# Equal commit times: the higher site id wins on every site. On local, C-X was last written locally and
+# C-A came from host; compare each with a remote change committed at exactly the same instant.
+$tie = { param($code, $from) Sql local "SELECT conduit.local_newer(xmin, pg_xact_commit_timestamp(xmin), '$from', 'local') FROM customers WHERE code = '$code'" }
+Check ((& $tie 'C-X' 'j') -eq 't' -and (& $tie 'C-X' 'zzz') -eq 'f') 'tie with a local row: the higher site id wins ("local" > "j")'
+Check ((& $tie 'C-A' 'a') -eq 't' -and (& $tie 'C-A' 'j') -eq 'f') 'tie with a row from host: host''s id counts, not this site''s ("host" < "j")'
 
 # ---------------------------------------------------------------------------
 Section "6. delete vs update while cut"

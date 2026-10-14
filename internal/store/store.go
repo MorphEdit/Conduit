@@ -70,6 +70,22 @@ var bootstrapSQL = []string{
 		deleted_at  TIMESTAMPTZ NOT NULL,
 		PRIMARY KEY (schema_name, table_name, pk)
 	)`,
+	// The site whose delete it was: breaks ties with a change committed at the
+	// same instant (see local_newer). Empty for markers made before v0.4.
+	`ALTER TABLE conduit.tombstones ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT ''`,
+	// Last write wins: is the row version written by transaction x newer than
+	// a remote change committed at remote_at by remote_origin? Equal commit
+	// times are broken by site id, so every site picks the same winner. Rows
+	// applied from a peer carry its replication origin ("conduit_<site>");
+	// rows written here have none and belong to self. Rows without a commit
+	// timestamp (written before track_commit_timestamp) count as oldest.
+	`CREATE OR REPLACE FUNCTION conduit.local_newer(x xid, remote_at timestamptz, remote_origin text, self text)
+	RETURNS boolean LANGUAGE sql STABLE AS $$
+		SELECT coalesce(c.timestamp > remote_at OR (c.timestamp = remote_at AND coalesce(
+			(SELECT substr(o.roname, 9) FROM pg_replication_origin o
+			 WHERE o.roident = c.roident AND o.roname LIKE 'conduit\_%'), self) > remote_origin), false)
+		FROM pg_xact_commit_timestamp_origin(x) c
+	$$`,
 	// Every remote change that was not applied as-is, for audit and manual fixes.
 	`CREATE TABLE IF NOT EXISTS conduit.conflicts (
 		id          BIGSERIAL PRIMARY KEY,
@@ -208,7 +224,7 @@ func (s *Store) DeleteCursor(ctx context.Context, peer string) error {
 // replay after a crash (before the slot position was confirmed) a no-op.
 // Local deletes also leave a tombstone, written in the same transaction.
 // part numbers the pieces of one big transaction; final marks the last one.
-func (s *Store) AppendOutbox(ctx context.Context, lsn string, part int, final bool, commitTime time.Time, changes []change.Change) error {
+func (s *Store) AppendOutbox(ctx context.Context, self, lsn string, part int, final bool, commitTime time.Time, changes []change.Change) error {
 	payload, err := json.Marshal(changes)
 	if err != nil {
 		return err
@@ -225,7 +241,7 @@ func (s *Store) AppendOutbox(ctx context.Context, lsn string, part int, final bo
 	}
 	for _, ch := range changes {
 		if ch.Op == "D" {
-			if err := AddTombstone(ctx, tx, ch.Schema, ch.Table, change.KeyJSON(ch.RowKey()), commitTime); err != nil {
+			if err := AddTombstone(ctx, tx, Tombstone{ch.Schema, ch.Table, change.KeyJSON(ch.RowKey()), commitTime, self}); err != nil {
 				return err
 			}
 		}
@@ -238,34 +254,37 @@ type Execer interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
 
-// Tombstone marks a row deleted at At (pk is the row's KeyJSON).
+// Tombstone marks a row deleted at At by site Origin (pk is the row's KeyJSON).
 type Tombstone struct {
 	Schema string    `json:"schema"`
 	Table  string    `json:"table"`
 	PK     string    `json:"pk"`
 	At     time.Time `json:"at"`
+	Origin string    `json:"origin,omitempty"`
 }
 
 // Tombstones returns every delete marker, as seen by q (e.g. a snapshot transaction).
 func Tombstones(ctx context.Context, q interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }) ([]Tombstone, error) {
-	rows, err := q.Query(ctx, `SELECT schema_name, table_name, pk, deleted_at FROM conduit.tombstones ORDER BY 1, 2, 3`)
+	rows, err := q.Query(ctx, `SELECT schema_name, table_name, pk, deleted_at, origin FROM conduit.tombstones ORDER BY 1, 2, 3`)
 	if err != nil {
 		return nil, err
 	}
 	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (Tombstone, error) {
 		var t Tombstone
-		return t, r.Scan(&t.Schema, &t.Table, &t.PK, &t.At)
+		return t, r.Scan(&t.Schema, &t.Table, &t.PK, &t.At, &t.Origin)
 	})
 }
 
-func AddTombstone(ctx context.Context, db Execer, schema, table, pk string, at time.Time) error {
+// AddTombstone records a delete, keeping the latest one (by time, then site
+// id, as in conduit.local_newer) if the row was deleted before.
+func AddTombstone(ctx context.Context, db Execer, t Tombstone) error {
 	_, err := db.Exec(ctx,
-		`INSERT INTO conduit.tombstones (schema_name, table_name, pk, deleted_at) VALUES ($1, $2, $3, $4)
-		 ON CONFLICT (schema_name, table_name, pk)
-		 DO UPDATE SET deleted_at = greatest(conduit.tombstones.deleted_at, EXCLUDED.deleted_at)`,
-		schema, table, pk, at)
+		`INSERT INTO conduit.tombstones (schema_name, table_name, pk, deleted_at, origin) VALUES ($1, $2, $3, $4, $5)
+		 ON CONFLICT (schema_name, table_name, pk) DO UPDATE SET deleted_at = EXCLUDED.deleted_at, origin = EXCLUDED.origin
+		 WHERE (conduit.tombstones.deleted_at, conduit.tombstones.origin) < (EXCLUDED.deleted_at, EXCLUDED.origin)`,
+		t.Schema, t.Table, t.PK, t.At, t.Origin)
 	return err
 }
 

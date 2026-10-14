@@ -33,6 +33,7 @@ reach the same answer:
 | While disconnected… | Result everywhere |
 |---|---|
 | A and B both edit row X, B later | B's version |
+| A and B both edit row X at exactly the same instant | The version from the site with the higher id |
 | A deletes X, B edits X later | X comes back with B's version |
 | B edits X, A deletes X later | X is deleted (remembered as a tombstone) |
 | A and B create rows that clash on a unique column | The clashing row is skipped and logged; the queue keeps moving. Resolve it by hand. |

@@ -43,6 +43,9 @@ type line struct {
 	// row
 	At     *time.Time     `json:"at,omitempty"`
 	Change *change.Change `json:"change,omitempty"`
+	// By is the site that wrote this row version, so the new site breaks
+	// ties between equal commit times the same way as everyone else.
+	By string `json:"by,omitempty"`
 
 	// tombstone
 	Tombstone *store.Tombstone `json:"tombstone,omitempty"`
@@ -114,7 +117,7 @@ func Serve(ctx context.Context, w http.ResponseWriter, pool *pgxpool.Pool, cfg *
 
 	var total int64
 	for _, t := range tables {
-		n, err := dumpTable(ctx, tx, enc, t)
+		n, err := dumpTable(ctx, tx, enc, t, cfg.NodeID)
 		if err != nil {
 			return fmt.Errorf("%s: %w", t, err)
 		}
@@ -144,7 +147,7 @@ type column struct {
 	key  bool
 }
 
-func dumpTable(ctx context.Context, tx pgx.Tx, enc *json.Encoder, qualified string) (int64, error) {
+func dumpTable(ctx context.Context, tx pgx.Tx, enc *json.Encoder, qualified, self string) (int64, error) {
 	schema, table, _ := strings.Cut(qualified, ".")
 	ident := pgx.Identifier{schema, table}.Sanitize()
 
@@ -167,11 +170,14 @@ func dumpTable(ctx context.Context, tx pgx.Tx, enc *json.Encoder, qualified stri
 
 	exprs := make([]string, len(cols))
 	for i, c := range cols {
-		exprs[i] = pgx.Identifier{c.name}.Sanitize() + "::text"
+		exprs[i] = "t." + pgx.Identifier{c.name}.Sanitize() + "::text"
 	}
+	// by: the site that wrote the row version (see conduit.local_newer).
 	rows, err = tx.Query(ctx, fmt.Sprintf(
-		`SELECT coalesce(pg_xact_commit_timestamp(xmin), 'epoch') AS ts, %s FROM %s ORDER BY ts`,
-		strings.Join(exprs, ", "), ident))
+		`SELECT coalesce(c.timestamp, 'epoch') AS ts, coalesce((SELECT substr(o.roname, 9) FROM pg_replication_origin o
+			WHERE o.roident = c.roident AND o.roname LIKE 'conduit\_%%'), $1) AS by, %s
+		 FROM %s t, pg_xact_commit_timestamp_origin(t.xmin) c ORDER BY ts, by`,
+		strings.Join(exprs, ", "), ident), self)
 	if err != nil {
 		return 0, err
 	}
@@ -179,11 +185,12 @@ func dumpTable(ctx context.Context, tx pgx.Tx, enc *json.Encoder, qualified stri
 
 	var n int64
 	vals := make([]*string, len(cols))
-	dest := make([]any, len(cols)+1)
+	dest := make([]any, len(cols)+2)
 	var at time.Time
-	dest[0] = &at
+	var by string
+	dest[0], dest[1] = &at, &by
 	for i := range vals {
-		dest[i+1] = &vals[i]
+		dest[i+2] = &vals[i]
 	}
 	for rows.Next() {
 		if err := rows.Scan(dest...); err != nil {
@@ -194,7 +201,7 @@ func dumpTable(ctx context.Context, tx pgx.Tx, enc *json.Encoder, qualified stri
 			ch.New[i] = change.Column{Name: c.name, Key: c.key, Value: vals[i]}
 		}
 		ts := at
-		if err := enc.Encode(line{Type: "row", At: &ts, Change: &ch}); err != nil {
+		if err := enc.Encode(line{Type: "row", At: &ts, Change: &ch, By: by}); err != nil {
 			return n, err
 		}
 		n++
@@ -253,6 +260,7 @@ func Pull(ctx context.Context, cfg *config.Config, peerID string, target peer.Ta
 	var (
 		group   []change.Change
 		groupAt time.Time
+		groupBy = peerID
 		applied int64
 		skipped int64
 		tombs   []store.Tombstone
@@ -270,7 +278,7 @@ func Pull(ctx context.Context, cfg *config.Config, peerID string, target peer.Ta
 		return nil
 	}
 	flush := func() error {
-		if err := ap.ApplyBaseline(ctx, peerID, groupAt, pendingTruncate, group); err != nil {
+		if err := ap.ApplyBaseline(ctx, groupBy, groupAt, pendingTruncate, group); err != nil {
 			return err
 		}
 		applied += int64(len(group))
@@ -315,12 +323,16 @@ func Pull(ctx context.Context, cfg *config.Config, peerID string, target peer.Ta
 			skipped++
 			continue
 		}
-		if len(group) > 0 && (!l.At.Equal(groupAt) || len(group) >= 500) {
+		by := l.By
+		if !config.ValidID(by) || by == cfg.NodeID {
+			by = peerID // older sites do not send it
+		}
+		if len(group) > 0 && (!l.At.Equal(groupAt) || by != groupBy || len(group) >= 500) {
 			if err := flush(); err != nil {
 				return err
 			}
 		}
-		groupAt = *l.At
+		groupAt, groupBy = *l.At, by
 		group = append(group, *l.Change)
 	}
 
