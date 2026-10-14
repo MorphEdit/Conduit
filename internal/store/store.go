@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -57,6 +58,9 @@ var bootstrapSQL = []string{
 		applied_seq BIGINT      NOT NULL DEFAULT 0,
 		updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 	)`,
+	// We have every change the origin committed before this time (see
+	// change.Batch.Through). Tombstones are kept until every site is past them.
+	`ALTER TABLE conduit.inbox_state ADD COLUMN IF NOT EXISTS through TIMESTAMPTZ`,
 	// Deleted-row markers: lets an old UPDATE that arrives after a newer
 	// DELETE lose instead of resurrecting the row.
 	`CREATE TABLE IF NOT EXISTS conduit.tombstones (
@@ -140,11 +144,44 @@ var bootstrapSQL = []string{
 
 type Store struct {
 	pool *pgxpool.Pool
+
+	// caughtUp (unix nanoseconds) is set by the capture: every transaction
+	// committed here before it is already in the outbox.
+	caughtUp atomic.Int64
 }
 
 func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 
 func (s *Store) Pool() *pgxpool.Pool { return s.pool }
+
+// SetCaughtUp records that every local commit before t is in the outbox.
+func (s *Store) SetCaughtUp(t time.Time) {
+	for {
+		old := s.caughtUp.Load()
+		if t.UnixNano() <= old || s.caughtUp.CompareAndSwap(old, t.UnixNano()) {
+			return
+		}
+	}
+}
+
+// CaughtUp returns the time set by SetCaughtUp (zero if not known yet).
+func (s *Store) CaughtUp() time.Time {
+	n := s.caughtUp.Load()
+	if n == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, n)
+}
+
+// SetThrough records a peer's promise that we have every change it committed
+// before t (see change.Batch.Through).
+func (s *Store) SetThrough(ctx context.Context, origin string, t time.Time) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO conduit.inbox_state (origin, applied_seq, through) VALUES ($1, 0, $2)
+		 ON CONFLICT (origin) DO UPDATE SET through = greatest(conduit.inbox_state.through, EXCLUDED.through)`,
+		origin, t)
+	return err
+}
 
 func (s *Store) Bootstrap(ctx context.Context) error {
 	for _, q := range bootstrapSQL {
@@ -232,10 +269,25 @@ func AddTombstone(ctx context.Context, db Execer, schema, table, pk string, at t
 	return err
 }
 
-// Janitor removes tombstones older than ttl and conflicts older than 90 days.
-func (s *Store) Janitor(ctx context.Context, ttl time.Duration) error {
-	if _, err := s.pool.Exec(ctx,
-		`DELETE FROM conduit.tombstones WHERE deleted_at < now() - make_interval(secs => $1)`, ttl.Seconds()); err != nil {
+// Janitor removes tombstones and conflicts older than 90 days.
+//
+// A tombstone goes only when it is older than ttl AND every other active site
+// has promised (change.Batch.Through) that we have all its changes from
+// before the delete. Otherwise a site that was offline longer than ttl could
+// send an older update for the row, find no tombstone, and bring it back here
+// while the delete wins on that site: the sites would differ for good. A site
+// we have no promise from yet keeps every tombstone. The minute of slack
+// covers commit timestamps taken just before a commit is written.
+func (s *Store) Janitor(ctx context.Context, self string, ttl time.Duration) error {
+	if _, err := s.pool.Exec(ctx, `
+		DELETE FROM conduit.tombstones
+		WHERE deleted_at < now() - make_interval(secs => $2)
+		  AND deleted_at < coalesce((
+			SELECT min(coalesce(i.through, '-infinity'))
+			FROM conduit.members m
+			LEFT JOIN conduit.inbox_state i ON i.origin = m.id
+			WHERE m.status = 'active' AND m.id <> $1), 'infinity') - interval '1 minute'`,
+		self, ttl.Seconds()); err != nil {
 		return err
 	}
 	_, err := s.pool.Exec(ctx, `DELETE FROM conduit.conflicts WHERE detected_at < now() - interval '90 days'`)

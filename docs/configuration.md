@@ -30,7 +30,9 @@ capture:
   schemas: [public]                 # which schemas to sync (default: public)
 
 tombstone_ttl: 168h                 # how long deletes are remembered for conflict
-                                    # resolution; longer than your longest outage
+                                    # resolution at least; a delete is also kept until
+                                    # every active site has caught up past it, so a long
+                                    # outage cannot bring deleted rows back
 outbox_retention: 1h                # keep delivered changes a while for sites
                                     # that are joining right now
 ```

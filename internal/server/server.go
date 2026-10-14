@@ -171,6 +171,10 @@ func (s *Server) apply(w http.ResponseWriter, r *http.Request, caller string) {
 	ack := v.Applier.Apply(ctx, b)
 	if ack.Error != "" {
 		s.log.Warn("apply failed", "origin", b.Origin, "applied", ack.Applied, "err", ack.Error)
+	} else if b.Through != nil {
+		if err := v.Store.SetThrough(ctx, b.Origin, *b.Through); err != nil {
+			ack.Error = "record through: " + err.Error()
+		}
 	}
 	writeJSON(w, ack)
 }

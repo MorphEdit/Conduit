@@ -31,6 +31,9 @@ const (
 	idlePoll     = 5 * time.Second
 	maxBackoff   = 30 * time.Second
 	requestLimit = 2 * time.Minute
+	// heartbeatEvery: how often an idle sender tells the peer how far it is
+	// caught up (change.Batch.Through).
+	heartbeatEvery = time.Minute
 )
 
 type Status struct {
@@ -102,13 +105,24 @@ func (s *Sender) Run(ctx context.Context) {
 	}
 	s.setAcked(cursor)
 
+	var lastThrough, nextBeat time.Time
 	for ctx.Err() == nil {
+		// Read before the outbox: if the outbox then has nothing after the
+		// peer's cursor, the peer has every commit made before this time.
+		through := s.store.CaughtUp()
 		txs, err := s.store.ReadOutbox(ctx, cursor, batchSize, batchBytes)
 		if err != nil {
 			fail(err)
 			continue
 		}
 		if len(txs) == 0 {
+			if through.After(lastThrough) && !time.Now().Before(nextBeat) {
+				// Best effort: a failure here also shows up on the next send.
+				if ack, err := s.send(ctx, nil, &through); err == nil && ack.Error == "" {
+					lastThrough = through
+				}
+				nextBeat = time.Now().Add(heartbeatEvery)
+			}
 			select {
 			case <-ctx.Done():
 			case <-s.wake:
@@ -117,7 +131,7 @@ func (s *Sender) Run(ctx context.Context) {
 			continue
 		}
 
-		ack, err := s.send(ctx, txs)
+		ack, err := s.send(ctx, txs, nil)
 		if ack.Applied > cursor {
 			cursor = ack.Applied
 			if err := s.store.SetCursor(ctx, s.peer.ID, cursor); err != nil {
@@ -144,8 +158,8 @@ func (s *Sender) Run(ctx context.Context) {
 	}
 }
 
-func (s *Sender) send(ctx context.Context, txs []change.Tx) (change.Ack, error) {
-	body, err := json.Marshal(change.Batch{Origin: s.nodeID, Txs: txs})
+func (s *Sender) send(ctx context.Context, txs []change.Tx, through *time.Time) (change.Ack, error) {
+	body, err := json.Marshal(change.Batch{Origin: s.nodeID, Txs: txs, Through: through})
 	if err != nil {
 		return change.Ack{}, err
 	}

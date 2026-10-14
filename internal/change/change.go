@@ -65,6 +65,10 @@ func (c Change) Size() int {
 type Batch struct {
 	Origin string `json:"origin"`
 	Txs    []Tx   `json:"txs"`
+	// Through, when set, promises that the receiver now has every change
+	// Origin committed before this time (Origin's clock). Receivers use it to
+	// know when a delete marker can no longer be needed.
+	Through *time.Time `json:"through,omitempty"`
 }
 
 // Ack is the peer's reply: the highest seq from Origin it has durably applied.

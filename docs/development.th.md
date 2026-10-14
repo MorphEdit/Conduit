@@ -165,7 +165,7 @@ CONDUIT_DATABASE=postgres://… CONDUIT_BOOTSTRAP=true CONDUIT_ADMIN_PASSWORD=�
 ```yaml
 tables:
   stock_lots: { owner: host }   # เขียนได้ที่ host เท่านั้น
-tombstone_ttl: 168h              # ต้องนานกว่าช่วงเน็ตหลุดที่นานที่สุด
+tombstone_ttl: 168h              # อายุขั้นต่ำ และจะไม่ลบจนกว่าทุกไซต์ที่ active ส่งข้อมูลตามทันหลังเวลาที่ลบแล้ว
 outbox_retention: 1h             # เก็บ change ที่ส่งแล้วไว้ช่วงหนึ่ง เผื่อไซต์ที่กำลังเข้าร่วม
 ```
 

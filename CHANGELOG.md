@@ -13,6 +13,10 @@
   site's name gets nothing. The invite works only for that site name, five wrong codes close the request,
   and the dashboard shows each request's IP. Sites on v0.3.0 must be updated (or use an invite) to join over
   the LAN
+- Fix: a site offline for longer than `tombstone_ttl` could bring a deleted row back on the other sites
+  while it stayed deleted on that site. Delete markers are now kept until every active site has caught up
+  past them: an idle site tells each peer every minute how far it is caught up. Upgrade every site; until a
+  site sends this, the others keep their delete markers
 
 ## v0.3.0 — security and consistency fixes
 

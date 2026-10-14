@@ -277,6 +277,29 @@ WaitHealthy host
 AssertSynced 'catch up after conduit-host restart'
 
 # ---------------------------------------------------------------------------
+Section "9b. delete markers are kept until every site has caught up"
+$fresh = "SELECT count(*) FROM conduit.inbox_state WHERE origin = 'local' AND through > now() - interval '5 minutes'"
+$deadline = (Get-Date).AddSeconds(180)
+while ((Get-Date) -lt $deadline -and (Sql host $fresh) -ne '1') { Start-Sleep 2 }
+Check ((Sql host $fresh) -eq '1') 'idle local tells host how far it has caught up'
+# local goes silent; host last heard it was caught up 40 days ago. A 30-day-old marker is past the
+# 7-day TTL, but local may still hold an older update for that row: host must keep the marker.
+$marker = "SELECT count(*) FROM conduit.tombstones WHERE pk = '{""id"":""-9""}'"
+Compose stop conduit-local 2>&1 | Out-Null
+Sql host "UPDATE conduit.inbox_state SET through = now() - interval '40 days' WHERE origin = 'local'" | Out-Null
+Sql host "INSERT INTO conduit.tombstones VALUES ('public', 'customers', '{""id"":""-9""}', now() - interval '30 days')" | Out-Null
+Compose restart conduit-host 2>&1 | Out-Null   # the janitor runs at start
+$null = WaitPhase host 'running'; Start-Sleep 3
+Check ((Sql host $marker) -eq '1') 'marker older than the TTL is kept while a site has not caught up past it'
+Sql host "UPDATE conduit.inbox_state SET through = now() WHERE origin = 'local'" | Out-Null
+Compose restart conduit-host 2>&1 | Out-Null
+$null = WaitPhase host 'running'; Start-Sleep 3
+Check ((Sql host $marker) -eq '0') 'marker is removed once every site has caught up past it'
+Compose start conduit-local 2>&1 | Out-Null
+WaitHealthy local
+AssertSynced 'sites in sync after the janitor checks'
+
+# ---------------------------------------------------------------------------
 Section "10. new site with nothing configured: auto Postgres setup, LAN discovery, approval"
 Compose up -d pg-branch conduit-branch 2>&1 | Out-Null
 $bs = WaitPhase branch 'needs_config'

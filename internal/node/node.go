@@ -278,7 +278,7 @@ func (r *Runtime) start(ctx context.Context, st *store.Store, id *cluster.Identi
 	goRun(func() { mgr.Run(ctx) })
 	goRun(func() {
 		for {
-			if err := st.Janitor(ctx, cfg.TombstoneTTL); err != nil && ctx.Err() == nil {
+			if err := st.Janitor(ctx, id.ID, cfg.TombstoneTTL); err != nil && ctx.Err() == nil {
 				log.Warn("janitor", "err", err)
 			}
 			st.Trim(ctx, id.ID, cfg.OutboxRetention)

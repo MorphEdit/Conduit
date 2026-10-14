@@ -177,6 +177,12 @@ func (c *Capture) stream(ctx context.Context) error {
 		txTime       time.Time
 		part         int
 		nextStatus   = time.Now().Add(statusInterval)
+		// Watermark probe: once the stream is confirmed past the WAL position
+		// Postgres reported at probeAt, every commit before probeAt is in the
+		// outbox (see store.SetCaughtUp).
+		probeLSN  pglogrepl.LSN
+		probeAt   time.Time
+		nextProbe time.Time
 	)
 	// flush writes the changes collected so far as one part of the current
 	// transaction. The (lsn, part) key makes a replay after a crash harmless.
@@ -207,6 +213,14 @@ func (c *Capture) stream(ctx context.Context) error {
 				c.setConfirmed(confirmed)
 			}
 			nextStatus = time.Now().Add(statusInterval)
+		}
+		if probeLSN != 0 && confirmed >= probeLSN {
+			c.store.SetCaughtUp(probeAt)
+			probeLSN = 0
+		}
+		if probeLSN == 0 && !time.Now().Before(nextProbe) {
+			probeLSN, probeAt = c.probe(ctx)
+			nextProbe = time.Now().Add(statusInterval)
 		}
 
 		rctx, cancel := context.WithDeadline(ctx, nextStatus)
@@ -303,6 +317,23 @@ func (c *Capture) stream(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// probe returns the current WAL position and the time it was read. Any
+// commit before that time was written to the WAL before that position.
+func (c *Capture) probe(ctx context.Context) (pglogrepl.LSN, time.Time) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	var s string
+	var at time.Time
+	if err := c.store.Pool().QueryRow(ctx, `SELECT pg_current_wal_lsn()::text, now()`).Scan(&s, &at); err != nil {
+		return 0, time.Time{}
+	}
+	lsn, err := pglogrepl.ParseLSN(s)
+	if err != nil {
+		return 0, time.Time{}
+	}
+	return lsn, at
 }
 
 func (c *Capture) row(op string, relID uint32, newTuple, oldTuple *pglogrepl.TupleData) (change.Change, error) {
