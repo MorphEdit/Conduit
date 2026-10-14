@@ -20,6 +20,7 @@ func TestDecideTrustRules(t *testing.T) {
 	later := t0.Add(time.Hour)
 	forged := member("host", "https://evil:7443", "000", "active", later)
 
+	// host allocates id slots (see Allocator).
 	cases := []struct {
 		name     string
 		local    *Member
@@ -40,13 +41,15 @@ func TestDecideTrustRules(t *testing.T) {
 			member("host", "https://evil:7443", "000", "removed", later), "host", "local", true, "https://host:7443", "removed"},
 		{"older record is ignored", &host, member("host", "https://x", "1", "active", t0.Add(-time.Hour)), "branch", "host", false, "", ""},
 		{"a joining site learns its own record from the seed", nil, member("branch", "https://b:7443", "ccc", "active", later), "branch", "host", true, "https://b:7443", "active"},
-		{"unknown site is learned as is", nil, member("newsite", "https://n:7443", "bbb", "active", later), "branch", "host", true, "https://n:7443", "active"},
+		{"unknown site is learned from the allocator", nil, member("newsite", "https://n:7443", "bbb", "active", later), "branch", "host", true, "https://n:7443", "active"},
+		{"unknown site is learned from itself", nil, member("newsite", "https://n:7443", "bbb", "active", later), "branch", "newsite", true, "https://n:7443", "active"},
+		{"a member cannot invent other members", nil, member("ghost", "https://g:7443", "ggg", "active", later), "branch", "local", false, "", ""},
 		{"no resurrection by a third party", ptr(member("host", "https://host:7443", "aaa", "removed", t0)),
 			member("host", "https://host:7443", "aaa", "active", later), "branch", "local", false, "", ""},
 		{"invalid id is ignored", nil, member("BAD ID", "https://x", "c", "active", later), "branch", "host", false, "", ""},
 	}
 	for _, c := range cases {
-		got, ok := decide(c.local, c.remote, c.self, c.from)
+		got, ok := decide(c.local, c.remote, c.self, c.from, "host")
 		if ok != c.wantOK {
 			t.Errorf("%s: ok = %v, want %v", c.name, ok, c.wantOK)
 			continue
@@ -59,11 +62,20 @@ func TestDecideTrustRules(t *testing.T) {
 
 func ptr(m Member) *Member { return &m }
 
+func TestJoiningSiteTakesTheSeedsView(t *testing.T) {
+	// A site that knows nobody yet (allocator "") takes every record from the
+	// site that admitted it, even when that site is not the allocator.
+	m := member("office", "https://o:7443", "ooo", "active", t0)
+	if _, ok := decide(nil, m, "branch", "local", ""); !ok {
+		t.Fatal("joining site must learn the members from its seed")
+	}
+}
+
 func TestSiteCannotChangeItsOwnIDSlot(t *testing.T) {
 	local := member("host", "https://host:7443", "aaa", "active", t0)
 	remote := member("host", "https://host2:7443", "aaa", "active", t0.Add(time.Hour))
 	remote.Offset = 7 // would collide with another site's ids
-	got, ok := decide(&local, remote, "branch", "host")
+	got, ok := decide(&local, remote, "branch", "host", "host")
 	if !ok || got.URL != "https://host2:7443" || got.Offset != 1 {
 		t.Fatalf("got ok=%v url=%s offset=%d; want the new URL with the original slot 1", ok, got.URL, got.Offset)
 	}

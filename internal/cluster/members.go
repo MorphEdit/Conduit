@@ -161,14 +161,20 @@ func putMember(ctx context.Context, pool *pgxpool.Pool, m Member) error {
 //     Its id slot was assigned when it joined and never changes.
 //   - Other sites may only pass on that a member was removed.
 //   - Nobody may change this site's record except to mark it removed.
-//   - Records for sites we have never heard of are taken as they are (that is
-//     how new members spread from the site that admitted them, and how a
-//     joining site first learns its own record).
-func decide(local *Member, remote Member, self, from string) (Member, bool) {
+//   - Records for sites we have never heard of are taken only from the
+//     allocator (every new site's slot is recorded there first, so that is
+//     how new members spread) or from that site itself. A joining site, which
+//     knows nobody yet, takes everything from the site that admitted it
+//     (allocator is then ""). Otherwise any member could mint itself extra
+//     credentials by inventing members.
+func decide(local *Member, remote Member, self, from, allocator string) (Member, bool) {
 	if !config.ValidID(remote.ID) || (remote.Status != "active" && remote.Status != "removed") {
 		return Member{}, false
 	}
 	if local == nil {
+		if allocator != "" && from != allocator && remote.ID != from {
+			return Member{}, false
+		}
 		// Includes our own record the first time we see it (when joining):
 		// there is nothing of ours yet to protect.
 		return remote, true
@@ -194,12 +200,16 @@ func mergeMembers(ctx context.Context, pool *pgxpool.Pool, ms []Member, self, fr
 		return false, err
 	}
 	byID := map[string]*Member{}
-	for i := range known {
+	allocator := ""
+	for i := range known { // ordered by offset: the first active one allocates
 		byID[known[i].ID] = &known[i]
+		if allocator == "" && known[i].Status == "active" {
+			allocator = known[i].ID
+		}
 	}
 	changed := false
 	for _, remote := range ms {
-		rec, ok := decide(byID[remote.ID], remote, self, from)
+		rec, ok := decide(byID[remote.ID], remote, self, from, allocator)
 		if !ok {
 			continue
 		}
@@ -227,17 +237,26 @@ func PutSetting(ctx context.Context, pool *pgxpool.Pool, key string, value any) 
 	if err != nil {
 		return err
 	}
-	_, err = mergeSettings(ctx, pool, []Setting{{Key: key, Value: raw, UpdatedAt: time.Now()}})
+	_, err = mergeSettings(ctx, pool, []Setting{{Key: key, Value: raw, UpdatedAt: time.Now()}}, false)
 	return err
 }
 
-func mergeSettings(ctx context.Context, pool *pgxpool.Pool, ss []Setting) (bool, error) {
+// fixedSettings are set once when the cluster is founded and never change
+// through gossip: a different id step would make sites' ids collide.
+var fixedSettings = []string{"step"}
+
+func mergeSettings(ctx context.Context, pool *pgxpool.Pool, ss []Setting, gossip bool) (bool, error) {
 	changed := false
+	fixed := []string{} // not nil: "<> ALL(NULL)" would block every update
+	if gossip {
+		fixed = fixedSettings
+	}
 	for _, s := range ss {
 		tag, err := pool.Exec(ctx, `
 			INSERT INTO conduit.settings (key, value, updated_at) VALUES ($1, $2, $3)
 			ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at
-			WHERE conduit.settings.updated_at < EXCLUDED.updated_at`, s.Key, []byte(s.Value), s.UpdatedAt)
+			WHERE conduit.settings.updated_at < EXCLUDED.updated_at AND conduit.settings.key <> ALL($4)`,
+			s.Key, []byte(s.Value), s.UpdatedAt, fixed)
 		if err != nil {
 			return changed, err
 		}
@@ -253,7 +272,7 @@ func Merge(ctx context.Context, pool *pgxpool.Pool, v View, self, from string) (
 	if err != nil {
 		return a, err
 	}
-	b, err := mergeSettings(ctx, pool, v.Settings)
+	b, err := mergeSettings(ctx, pool, v.Settings, true)
 	return a || b, err
 }
 

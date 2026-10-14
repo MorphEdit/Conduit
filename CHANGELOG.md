@@ -26,6 +26,9 @@
 - Security: ten wrong admin passwords from one address lock it out for 15 minutes. A site without an admin
   password shows its pairing code only on that machine itself (and in its log), no longer to anyone on the
   LAN. Conduit warns at start when the plain-HTTP dashboard listens on every interface
+- Security: a member learns a new site only from the site that hands out id slots or from the new site
+  itself, so one member can no longer invent members with credentials of its own; the cluster's id step
+  can no longer be changed through gossip
 
 ## v0.3.0 — security and consistency fixes
 

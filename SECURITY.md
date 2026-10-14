@@ -23,7 +23,14 @@ Security fixes are released for the latest version. Please upgrade before report
 - A site can only deliver its own changes; it cannot pretend to be another site. Changes are applied only to
   the synced schemas: never to Conduit's own tables (`conduit`) or the system catalogs.
 - A site's address, key and certificate can only be changed by that site itself. Other sites may only pass on
-  that a member was removed, so one compromised site cannot redirect traffic meant for another.
+  that a member was removed, so one compromised site cannot redirect traffic meant for another. A new member is
+  learned only from the site that hands out id slots or from that member itself, so a site cannot invent
+  members with credentials of its own; the id step fixed when the cluster was founded never changes.
+- Member sites trust each other with the data: any member may write every synced table on every other site
+  (except owner-only tables it does not own), read a full snapshot, and change the shared table policies.
+  Only admit sites you control, and remove a site you no longer trust.
+- Conflicts are decided by commit time, so keep every site's clock in sync (NTP): a site whose clock runs
+  ahead wins every conflict until the others catch up.
 - LAN join requests are accepted only from private addresses, two pending per address.
 - Postgres passwords are passed to `pg_dump`/`psql` through the environment, never on the command line.
 - Conduit does not change Postgres settings unless an admin allows it (or `CONDUIT_CONFIGURE_POSTGRES=true`).
