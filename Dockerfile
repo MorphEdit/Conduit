@@ -12,7 +12,7 @@ RUN CGO_ENABLED=0 go build -trimpath \
     -ldflags="-s -w -X github.com/MorphEdit/conduit/internal/buildinfo.Version=${VERSION} -X github.com/MorphEdit/conduit/internal/buildinfo.Commit=${COMMIT}" \
     -o /out/conduit ./cmd/conduit
 
-FROM alpine:3.20
+FROM alpine:3.22
 # pg_dump/psql copy table definitions to a newly joining site.
 RUN apk add --no-cache postgresql16-client
 RUN adduser -D -u 10001 conduit
