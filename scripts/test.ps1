@@ -341,23 +341,30 @@ $req = (Status host).join_requests | Where-Object node_id -eq 'branch' | Select-
 Check ($null -ne $req -and -not $req.code) 'the pairing code never leaves branch (host only sees the request)'
 Check ((Admin host "/v1/admin/requests/$($req.id)/approve" 'wrong' @{ code = $pair.code }) -eq 401) 'approval needs the admin password'
 Check ((Admin host "/v1/admin/requests/$($req.id)/approve" $adminPw @{ code = '12' }) -eq 400) 'approval needs a 6-digit code'
-# A wrong code is caught on host itself (checked against branch's commit): no invite is made.
+# The invite is sealed with the code (PAKE): host cannot tell a wrong code, but branch cannot open
+# the approval, so it shows a fresh code and asks again.
 $wrong = if (($pair.code -replace ' ', '') -eq '000000') { '000001' } else { '000000' }
-Check ((Admin host "/v1/admin/requests/$($req.id)/approve" $adminPw @{ code = $wrong }) -eq 400) 'host refuses an approval with the wrong code'
-Start-Sleep 4
-Check ((StatusAdmin branch).pairing.status -eq 'requested' -and (Status branch).phase -eq 'waiting_to_join') 'branch is still waiting with the same request'
+Check ((Admin host "/v1/admin/requests/$($req.id)/approve" $adminPw @{ code = $wrong }) -eq 204) 'host sealed an approval with a wrong code'
+$deadline = (Get-Date).AddSeconds(20)
+while ((Get-Date) -lt $deadline -and ((StatusAdmin branch).pairing.status -ne 'bad_proof')) { Start-Sleep 1 }
+$bad = (StatusAdmin branch).pairing
+Check ($bad.status -eq 'bad_proof' -and $bad.code -ne $pair.code -and (Status branch).phase -eq 'waiting_to_join') 'branch could not open the wrong-code approval and made a new code'
 # A fake site on the LAN asks to join under branch's name. The admin types the code shown on the real
-# branch: the fake request must not get an invite.
-$fake = @{ node_id = 'branch'; url = 'https://evil:7443'; secret = ('f' * 32); commit = ('0' * 64) }
+# branch: the fake request gets only a sealed invite it cannot open.
+$fakePake = [Convert]::ToBase64String([byte[]](1..32))
+$fake = @{ node_id = 'branch'; url = 'https://evil:7443'; secret = ('f' * 32); pake = $fakePake }
 Check ((PeerCall host POST '/v1/join-requests' '' $fake) -eq 200) 'a fake site asked to join as "branch"'
 $fakeId = ($script:peerBody | ConvertFrom-Json).request_id
-Check ((Admin host "/v1/admin/requests/$fakeId/approve" $adminPw @{ code = $pair.code }) -eq 400) 'the real branch''s code does not approve the fake request'
+Admin host "/v1/admin/requests/$fakeId/approve" $adminPw @{ code = $pair.code } | Out-Null
 $poll = & curl.exe -sk -H "X-Request-Secret: $('f' * 32)" "https://127.0.0.1:$($peerPorts.host)/v1/join-requests/$fakeId" | ConvertFrom-Json
-Check ($poll.status -eq 'pending' -and -not $poll.invite) "the fake request got no invite ($($poll.status))"
-Admin host "/v1/admin/requests/$fakeId/reject" | Out-Null
-$legacy = @{ node_id = 'oldsite'; url = 'https://old:7443'; secret = ('a' * 32) }
-Check ((PeerCall host POST '/v1/join-requests' '' $legacy) -eq 400) 'a request with neither code nor commit is refused'
+Check (-not $poll.invite -and -not $poll.proof) "the fake request got no readable invite ($($poll.status))"
+$legacy = @{ node_id = 'oldsite'; url = 'https://old:7443'; secret = ('a' * 32); commit = ('0' * 64) }
+Check ((PeerCall host POST '/v1/join-requests' '' $legacy) -eq 400) 'a request without a pairing exchange (v0.4 and older) is refused'
+$deadline = (Get-Date).AddSeconds(60)
+while ((Get-Date) -lt $deadline -and ((StatusAdmin branch).pairing.status -ne 'requested')) { Start-Sleep 1 }
+$pair = (StatusAdmin branch).pairing
 $req = (Status host).join_requests | Where-Object { $_.node_id -eq 'branch' -and $_.url -ne 'https://evil:7443' } | Select-Object -First 1
+Check ($pair.status -eq 'requested' -and $null -ne $req) "branch asked again with a new code ($($pair.code))"
 Check ((Admin host "/v1/admin/requests/$($req.id)/approve" $adminPw @{ code = $pair.code }) -eq 204) 'admin approved branch with the code shown on branch'
 $bs = WaitPhase branch 'running'
 Check ($null -ne $bs -and $bs.sequences.offset -eq 3) 'branch joined (id slot 3), tables and data copied'

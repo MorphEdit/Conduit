@@ -13,7 +13,7 @@ import (
 )
 
 // PendingJoin is a site found on the LAN asking to be let in. An admin
-// types the code shown on the new site when approving (see PairingCommit).
+// types the code shown on the new site when approving (see PairingSeal).
 type PendingJoin struct {
 	ID        string    `json:"id"`
 	NodeID    string    `json:"node_id"`
@@ -23,19 +23,14 @@ type PendingJoin struct {
 	From      string    `json:"from"` // requester's IP address
 
 	secretHash string
-	commit     string // never exported: the code could be guessed from it
-	misses     int
-	invite     string
-	proof      string
+	pake       []byte // the new site's half of the pairing exchange
+	reply      []byte // ours, once approved
+	box        []byte // the invite, encrypted for the site that knows the code
 }
 
-// ErrCodeMismatch means the typed pairing code is not the one the site sent.
-var ErrCodeMismatch = errors.New("pairing code does not match the one shown on the new site")
-
-// ErrNoPairingProof means a request carries no commit to its pairing code
-// (a site older than v0.4), so nothing could tell it apart from a fake site
-// asking under the same name. Sites older than v0.3 sent the code itself,
-// which anyone could read from /status and reuse, so they are refused too.
+// ErrNoPairingProof means a request carries no pairing exchange (a site older
+// than v0.5). v0.4 sent an HMAC of its 6-digit code, which whoever received
+// it could brute-force offline, so those sites are refused too.
 var ErrNoPairingProof = errors.New("this site's Conduit is too old for LAN pairing: update it, or join with an invite code")
 
 // Requests holds join requests in memory; a restart simply makes the new
@@ -49,9 +44,6 @@ const (
 	maxPending      = 50
 	maxPendingPerIP = 2
 	requestTTL      = 15 * time.Minute
-	// A request is rejected after this many wrong codes; the new site asks
-	// again later with a fresh code.
-	maxCodeMisses = 5
 )
 
 // ErrTooMany means the request queue (or this address's share of it) is full.
@@ -70,8 +62,8 @@ func (r *Requests) gc() {
 // Add records a request from the given address, replacing any earlier one
 // from the same site. Each address may have only a couple pending, so one
 // machine cannot fill the queue and lock real sites out.
-func (r *Requests) Add(from, nodeID, url, commit, secret string) (string, error) {
-	if commit == "" {
+func (r *Requests) Add(from, nodeID, url string, pake []byte, secret string) (string, error) {
+	if len(pake) == 0 {
 		return "", ErrNoPairingProof
 	}
 	r.mu.Lock()
@@ -95,68 +87,56 @@ func (r *Requests) Add(from, nodeID, url, commit, secret string) (string, error)
 	}
 	id := randomHex(8)
 	r.m[id] = &PendingJoin{ID: id, NodeID: nodeID, URL: url, Status: "pending", CreatedAt: time.Now(),
-		From: from, secretHash: hashSecret(secret), commit: commit}
+		From: from, secretHash: hashSecret(secret), pake: pake}
 	return id, nil
 }
 
 // Poll lets the requesting site learn the outcome; it proves it made the
-// request with the secret only it knows.
-func (r *Requests) Poll(id, secret string) (status, invite, proof string, ok bool) {
+// request with the secret only it knows. An approval carries our half of the
+// pairing exchange and the sealed invite (see PairingOpen).
+func (r *Requests) Poll(id, secret string) (status string, reply, box []byte, ok bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	p, found := r.m[id]
 	if !found || subtle.ConstantTimeCompare([]byte(p.secretHash), []byte(hashSecret(secret))) != 1 {
-		return "", "", "", false
+		return "", nil, nil, false
 	}
 	if p.Status != "pending" {
 		delete(r.m, id)
 	}
-	return p.Status, p.invite, p.proof, true
+	return p.Status, p.reply, p.box, true
 }
 
 var errNoRequest = errors.New("no such pending request")
 
-// Check validates a typed pairing code before an approval and returns the
-// requesting site's name: only the site showing that code (the one that sent
-// the matching commit) can receive the invite. Too many wrong codes reject
-// the request.
-func (r *Requests) Check(id, code string) (string, error) {
+// Site returns the name a pending request asks to join as, for the invite
+// that only that site may redeem.
+func (r *Requests) Site(id string) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	p, ok := r.m[id]
 	if !ok || p.Status != "pending" {
 		return "", errNoRequest
 	}
-	if len(NormalizeCode(code)) != 6 {
-		return "", errors.New("type the 6-digit pairing code shown on the new site")
-	}
-	if !p.matches(code) {
-		if p.misses++; p.misses >= maxCodeMisses {
-			p.Status = "rejected"
-		}
-		return "", ErrCodeMismatch
-	}
 	return p.NodeID, nil
 }
 
-func (p *PendingJoin) matches(code string) bool {
-	return CommitMatches(p.commit, code, p.secretHash)
-}
-
-// Approve hands the request its invite, with the proof that the approving
-// admin knew the code shown on the new site. The code is checked again here,
-// so an invite never reaches a request whose code was not typed.
-func (r *Requests) Approve(id, code, invite, seedFP string) error {
+// Approve answers the request with the code the admin typed and seals the
+// invite for it. The approving site cannot tell a mistyped code from the right
+// one: only the site showing the code can open the invite. On a wrong code the
+// new site shows a fresh one and asks again.
+func (r *Requests) Approve(id, code, invite, selfFP string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	p, ok := r.m[id]
 	if !ok || p.Status != "pending" {
 		return errNoRequest
 	}
-	if !p.matches(code) {
-		return ErrCodeMismatch
+	reply, box, err := PairingSeal(code, p.NodeID, selfFP, p.pake, id, invite)
+	if err != nil {
+		return err
 	}
-	p.Status, p.invite, p.proof = "approved", invite, PairingProof(code, id, seedFP, invite)
+	p.Status, p.reply, p.box = "approved", reply, box
 	return nil
 }
 

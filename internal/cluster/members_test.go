@@ -84,7 +84,7 @@ func TestSiteCannotChangeItsOwnIDSlot(t *testing.T) {
 func TestJoinRequestLimits(t *testing.T) {
 	r := NewRequests()
 	secret := "0123456789abcdef"
-	commit := PairingCommit("111111", HashSecret(secret))
+	commit, _, _ := PairingStart("111111", "site", "fp")
 	for i := 0; i < maxPendingPerIP; i++ {
 		if _, err := r.Add("10.0.0.5", "site"+string(rune('a'+i)), "https://x", commit, secret); err != nil {
 			t.Fatalf("request %d from one address refused: %v", i, err)

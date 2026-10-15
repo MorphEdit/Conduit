@@ -46,7 +46,7 @@ const (
 // Pairing is what a site waiting to join shows on its own dashboard.
 type Pairing struct {
 	// Code never leaves this site: the admin types it on the approving site,
-	// which proves the approval with it (see cluster.PairingProof).
+	// which seals the invite with it (see cluster.PairingSeal).
 	Code   string `json:"code"`
 	Hidden bool   `json:"hidden,omitempty"`  // Code withheld: the viewer is not an admin
 	SeedID string `json:"seed_id,omitempty"` // site the request went to

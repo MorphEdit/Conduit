@@ -5,24 +5,39 @@
 package cluster
 
 import (
-	"crypto/hmac"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/hkdf"
+	"crypto/rand"
 	"crypto/sha256"
-	"encoding/hex"
+	"errors"
 	"strings"
+
+	"filippo.io/cpace"
 )
 
 // LAN pairing. A site waiting to join shows a 6-digit code on its own
-// dashboard and never sends the code itself anywhere. The proof works both
-// ways:
+// dashboard; the admin types it when approving on another site. The code is
+// the password of a CPace exchange (a PAKE):
 //
-//   - The new site sends PairingCommit with its request. The approving site
-//     checks the code the admin types against it and hands out an invite only
-//     if it matches, so a fake site on the LAN that asks to join under a real
-//     site's name gets nothing (it never saw the code shown on the real one).
-//   - The approving site returns PairingProof with the invite. The new site
-//     accepts the invite only if the proof matches, so a fake site that
-//     answered the LAN broadcast cannot approve the join, and an approval
-//     cannot be replayed to another request, site or invite.
+//   - The new site sends PairingStart's message with its request.
+//   - The approving site answers with PairingSeal: its half of the exchange
+//     and the invite, encrypted under the key the exchange derives.
+//   - The new site opens it with PairingOpen.
+//
+// Only a party that knows the code derives the same key, and nothing either
+// side sends lets anyone test guesses offline: each request is worth one
+// guess at most. (A plain HMAC keyed by six digits could be brute-forced in
+// a second by whoever received it, including a fake site answering the LAN
+// broadcast.) The exchange is bound to the new site's name and to the
+// certificate of the site it is talking to, so a fake site in the middle that
+// relays the request to a real one gets nothing either side can use.
+
+const pairingContext = "conduit-pair-v2"
+
+// ErrBadPairing means an approval could not be opened: a mistyped code, or
+// a fake site on the LAN.
+var ErrBadPairing = errors.New("join approval did not prove the pairing code")
 
 // NormalizeCode keeps only the digits of a typed pairing code.
 func NormalizeCode(s string) string {
@@ -35,36 +50,74 @@ func NormalizeCode(s string) string {
 	return b.String()
 }
 
-// PairingProof binds an approval to the pairing code, the join request, the
-// approving site's certificate and the invite it hands out.
-func PairingProof(code, requestID, seedFP, invite string) string {
-	m := hmac.New(sha256.New, []byte(NormalizeCode(code)))
-	m.Write([]byte("conduit-pair-v1|" + requestID + "|" + strings.ToLower(seedFP) + "|" + invite))
-	return hex.EncodeToString(m.Sum(nil))
+// ValidCode reports whether s holds a 6-digit pairing code.
+func ValidCode(s string) bool { return len(NormalizeCode(s)) == 6 }
+
+func pairingInfo(nodeID, seedFP string) *cpace.ContextInfo {
+	return cpace.NewContextInfo(nodeID, strings.ToLower(seedFP), []byte(pairingContext))
 }
 
-// PairingCommit binds a join request to the code shown on the requesting
-// site. It is keyed by the hash of the request's secret, which only the
-// approving site holds, and is kept in that site's memory only: six digits
-// are easy to guess offline, so it must never be shown or logged.
-func PairingCommit(code, secretHash string) string {
-	m := hmac.New(sha256.New, []byte(NormalizeCode(code)))
-	m.Write([]byte("conduit-commit-v1|" + secretHash))
-	return hex.EncodeToString(m.Sum(nil))
-}
-
-// CommitMatches checks the code an admin typed against a request's commit.
-func CommitMatches(commit, code, secretHash string) bool {
-	if commit == "" || len(NormalizeCode(code)) != 6 {
-		return false
+// PairingStart begins pairing on the new site, which asks to join as nodeID
+// through the site whose certificate is seedFP. msg goes with the request;
+// st opens the approval.
+func PairingStart(code, nodeID, seedFP string) (msg []byte, st *cpace.State, err error) {
+	if !ValidCode(code) {
+		return nil, nil, errors.New("pairing code must have 6 digits")
 	}
-	return hmac.Equal([]byte(commit), []byte(PairingCommit(code, secretHash)))
+	return cpace.Start(NormalizeCode(code), pairingInfo(nodeID, seedFP))
 }
 
-// ProofMatches checks an approval received by the site waiting to join.
-func ProofMatches(proof, code, requestID, seedFP, invite string) bool {
-	if proof == "" || len(NormalizeCode(code)) != 6 {
-		return false
+// PairingSeal answers a request's msg on the approving site (whose
+// certificate is selfFP) with the code the admin typed, and encrypts the
+// invite under the derived key.
+func PairingSeal(code, nodeID, selfFP string, msg []byte, requestID, invite string) (reply, box []byte, err error) {
+	if !ValidCode(code) {
+		return nil, nil, errors.New("type the 6-digit pairing code shown on the new site")
 	}
-	return hmac.Equal([]byte(proof), []byte(PairingProof(code, requestID, seedFP, invite)))
+	reply, key, err := cpace.Exchange(NormalizeCode(code), pairingInfo(nodeID, selfFP), msg)
+	if err != nil {
+		return nil, nil, err
+	}
+	aead, err := pairingAEAD(key, requestID)
+	if err != nil {
+		return nil, nil, err
+	}
+	nonce := make([]byte, aead.NonceSize())
+	rand.Read(nonce)
+	return reply, aead.Seal(nonce, nonce, []byte(invite), []byte(requestID)), nil
+}
+
+// PairingOpen finishes pairing on the new site and returns the invite.
+func PairingOpen(st *cpace.State, reply, box []byte, requestID string) (string, error) {
+	if st == nil || len(reply) == 0 {
+		return "", ErrBadPairing
+	}
+	key, err := st.Finish(reply)
+	if err != nil {
+		return "", ErrBadPairing
+	}
+	aead, err := pairingAEAD(key, requestID)
+	if err != nil {
+		return "", err
+	}
+	if len(box) < aead.NonceSize() {
+		return "", ErrBadPairing
+	}
+	invite, err := aead.Open(nil, box[:aead.NonceSize()], box[aead.NonceSize():], []byte(requestID))
+	if err != nil {
+		return "", ErrBadPairing
+	}
+	return string(invite), nil
+}
+
+func pairingAEAD(key []byte, requestID string) (cipher.AEAD, error) {
+	k, err := hkdf.Expand(sha256.New, key, pairingContext+" invite|"+requestID, 32)
+	if err != nil {
+		return nil, err
+	}
+	block, err := aes.NewCipher(k)
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(block)
 }

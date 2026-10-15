@@ -189,7 +189,7 @@ function renderCluster(m) {
     $('join-title').textContent = st.phase === 'joining' ? (st.notice || 'กำลังเข้าร่วม…') :
       p.status === 'requested' ? `ส่งคำขอไปที่ ${String(p.seed_id || '').toUpperCase()} แล้ว — รออนุมัติ` :
       p.status === 'rejected' ? 'คำขอถูกปฏิเสธ — จะลองใหม่ใน 5 นาที' :
-      p.status === 'bad_proof' ? 'การอนุมัติใช้รหัสไม่ตรง — สร้างรหัสใหม่แล้ว กดอนุมัติอีกครั้งด้วยรหัสใหม่' : 'กำลังค้นหาไซต์อื่นในวง LAN…';
+      p.status === 'bad_proof' ? 'เปิดการอนุมัติไม่ได้ (รหัสไม่ตรง หรือเครื่องปลอมใน LAN) — สร้างรหัสใหม่แล้ว จะขอเข้าร่วมอีกครั้งในไม่ช้า' : 'กำลังค้นหาไซต์อื่นในวง LAN…';
     $('paste-form').hidden = st.phase === 'joining';
   }
 
@@ -259,14 +259,18 @@ document.addEventListener('click', async e => {
   const id = a.dataset.approve || a.dataset.reject;
   let body;
   if (a.dataset.approve) {
-    // The code is shown only on the new site's own screen. Typing it here
-    // proves both ways that this approval goes to that very site.
+    // The code is shown only on the new site's own screen. The invite is
+    // sealed with it, so only that very site can open it.
     const from = a.dataset.from ? ` (คำขอมาจาก IP ${a.dataset.from})` : '';
     const code = window.prompt(`พิมพ์รหัสจับคู่ 6 หลักที่แสดงบนหน้าจอของ ${a.dataset.name.toUpperCase()}${from}`);
     if (code === null) return;
     body = { code };
   } else if (!confirm('ปฏิเสธคำขอนี้?')) return;
-  try { await adminFetch(`v1/admin/requests/${id}/${a.dataset.approve ? 'approve' : 'reject'}`, body); tick(); }
+  try {
+    await adminFetch(`v1/admin/requests/${id}/${a.dataset.approve ? 'approve' : 'reject'}`, body); tick();
+    // The invite is sealed with the code: only the new site can tell a typo.
+    if (a.dataset.approve) alert(`ส่งการอนุมัติแล้ว ถ้ารหัสถูก ${a.dataset.name.toUpperCase()} จะเริ่มเข้าร่วมเอง — ถ้าพิมพ์ผิด ไซต์นั้นจะสร้างรหัสใหม่และขอเข้ามาอีกครั้ง`);
+  }
   catch (err) { alert(err.message); }
 });
 $('show-code').addEventListener('click', async () => {

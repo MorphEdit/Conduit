@@ -64,15 +64,15 @@ func (s *Server) joinRequest(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		NodeID string `json:"node_id"`
 		URL    string `json:"url"`
-		Commit string `json:"commit"` // see cluster.PairingCommit
+		Pake   []byte `json:"pake"` // see cluster.PairingStart
 		Secret string `json:"secret"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12)).Decode(&body); err != nil ||
-		!config.ValidID(body.NodeID) || body.URL == "" || len(body.Commit) > 128 || len(body.Secret) < 16 {
+		!config.ValidID(body.NodeID) || body.URL == "" || len(body.Pake) > 256 || len(body.Secret) < 16 {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	id, err := s.rt.Requests.Add(host, body.NodeID, body.URL, body.Commit, body.Secret)
+	id, err := s.rt.Requests.Add(host, body.NodeID, body.URL, body.Pake, body.Secret)
 	switch {
 	case errors.Is(err, cluster.ErrNoPairingProof):
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -86,12 +86,12 @@ func (s *Server) joinRequest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) joinPoll(w http.ResponseWriter, r *http.Request) {
-	status, invite, proof, ok := s.rt.Requests.Poll(r.PathValue("id"), r.Header.Get("X-Request-Secret"))
+	status, reply, box, ok := s.rt.Requests.Poll(r.PathValue("id"), r.Header.Get("X-Request-Secret"))
 	if !ok {
 		http.Error(w, "unknown request", http.StatusNotFound)
 		return
 	}
-	writeJSON(w, map[string]string{"status": status, "invite": invite, "proof": proof})
+	writeJSON(w, map[string]any{"status": status, "pake": reply, "box": box})
 }
 
 // allocate assigns an id slot for a newcomer another member is admitting
@@ -167,15 +167,19 @@ func (s *Server) decide(w http.ResponseWriter, r *http.Request) {
 	var err error
 	switch decision {
 	case "approve":
-		// The admin types the pairing code shown on the new site. It must
-		// match the request's commit before any invite is made, and the new
-		// site only accepts an approval proven with it.
+		// The admin types the pairing code shown on the new site. The invite
+		// is sealed with it, so only the site showing that code can open it
+		// (see cluster.PairingSeal).
 		var body struct {
 			Code string `json:"code"`
 		}
 		json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10)).Decode(&body)
+		if !cluster.ValidCode(body.Code) {
+			err = errors.New("type the 6-digit pairing code shown on the new site")
+			break
+		}
 		var site string
-		if site, err = s.rt.Requests.Check(id, body.Code); err != nil {
+		if site, err = s.rt.Requests.Site(id); err != nil {
 			break
 		}
 		var invite string

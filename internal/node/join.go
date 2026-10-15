@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	"filippo.io/cpace"
+
 	"github.com/MorphEdit/conduit/internal/apply"
 	"github.com/MorphEdit/conduit/internal/cluster"
 	"github.com/MorphEdit/conduit/internal/peer"
@@ -54,7 +56,9 @@ func (r *Runtime) join(ctx context.Context, st *store.Store) (*cluster.Identity,
 	reqSecret := randHex(16)
 	var reqID string
 	var seed peer.Target
+	var pake *cpace.State
 	var quietUntil time.Time
+	badApprovals := 0
 
 	for {
 		if code != "" {
@@ -71,8 +75,8 @@ func (r *Runtime) join(ctx context.Context, st *store.Store) (*cluster.Identity,
 			if reqID == "" {
 				if b, ok := lan.Best(); ok && b.FP != "" {
 					t := peer.Target{URL: b.URL, Fingerprint: b.FP}
-					if id, err := r.requestJoin(ctx, t, r.View().Pairing.Code, reqSecret); err == nil {
-						reqID, seed = id, t
+					if id, st, err := r.requestJoin(ctx, t, r.View().Pairing.Code, reqSecret); err == nil {
+						reqID, seed, pake = id, t, st
 						r.set(func() { pairing.SeedID, pairing.Status = b.ID, "requested" })
 						r.Log.Info("asked to join; approve it on the dashboard", "site", b.ID, "pairing_code", pairing.Code)
 					} else {
@@ -80,23 +84,30 @@ func (r *Runtime) join(ctx context.Context, st *store.Store) (*cluster.Identity,
 					}
 				}
 			} else {
-				status, invite, proof, err := r.pollJoin(ctx, seed, reqID, reqSecret)
+				status, reply, box, err := r.pollJoin(ctx, seed, reqID, reqSecret)
+				var invite string
+				if err == nil && status == "approved" {
+					invite, err = cluster.PairingOpen(pake, reply, box, reqID)
+				}
 				switch {
-				case err != nil:
-					reqID = "" // the other site restarted; ask again
-				case status == "approved" && !cluster.ProofMatches(proof, r.View().Pairing.Code, reqID, seed.Fingerprint, invite):
+				case errors.Is(err, cluster.ErrBadPairing):
 					// Whoever approved did not know the code shown on this
 					// site: a mistyped code, or a fake site on the LAN. Never
-					// use what it sent; start over with a fresh code.
-					reqID, quietUntil = "", time.Now().Add(20*time.Second)
+					// use what it sent; start over with a fresh code, waiting
+					// longer each time so a fake site gets few guesses.
+					badApprovals++
+					reqID, pake = "", nil
+					quietUntil = time.Now().Add(min(20*time.Second<<min(badApprovals-1, 5), 10*time.Minute))
 					next := pairingCode()
 					r.set(func() { pairing.Code, pairing.Status = next, "bad_proof" })
 					r.Log.Warn("join approval did not prove the pairing code; ignored it", "site", pairing.SeedID, "new_pairing_code", next)
+				case err != nil:
+					reqID, pake = "", nil // the other site restarted; ask again
 				case status == "approved":
 					code = invite
 					continue
 				case status == "rejected":
-					reqID, quietUntil = "", time.Now().Add(5*time.Minute)
+					reqID, pake, quietUntil = "", nil, time.Now().Add(5*time.Minute)
 					r.set(func() { pairing.Status = "rejected" })
 				}
 			}
@@ -112,22 +123,32 @@ func (r *Runtime) join(ctx context.Context, st *store.Store) (*cluster.Identity,
 }
 
 // requestJoin asks a site found on the LAN to let this one in. The pairing
-// code itself is deliberately not sent: the approving admin types it, and the
-// commit lets that site check it before handing out an invite.
-func (r *Runtime) requestJoin(ctx context.Context, seed peer.Target, code, secret string) (string, error) {
-	body, _ := json.Marshal(map[string]string{"node_id": r.Cfg.NodeID, "url": r.Cfg.Advertise, "secret": secret,
-		"commit": cluster.PairingCommit(code, cluster.HashSecret(secret))})
+// code itself is never sent: the request carries this site's half of a PAKE
+// keyed by it, which the approving admin answers by typing the code.
+func (r *Runtime) requestJoin(ctx context.Context, seed peer.Target, code, secret string) (string, *cpace.State, error) {
+	msg, st, err := cluster.PairingStart(code, r.Cfg.NodeID, seed.Fingerprint)
+	if err != nil {
+		return "", nil, err
+	}
+	body, _ := json.Marshal(map[string]any{"node_id": r.Cfg.NodeID, "url": r.Cfg.Advertise, "secret": secret, "pake": msg})
 	var out struct {
 		RequestID string `json:"request_id"`
 	}
-	return out.RequestID, call(ctx, seed, peer.Credentials{}, http.MethodPost, "/v1/join-requests", body, nil, &out)
+	if err := call(ctx, seed, peer.Credentials{}, http.MethodPost, "/v1/join-requests", body, nil, &out); err != nil {
+		return "", nil, err
+	}
+	return out.RequestID, st, nil
 }
 
-func (r *Runtime) pollJoin(ctx context.Context, seed peer.Target, id, secret string) (status, invite, proof string, err error) {
-	var out struct{ Status, Invite, Proof string }
+func (r *Runtime) pollJoin(ctx context.Context, seed peer.Target, id, secret string) (status string, reply, box []byte, err error) {
+	var out struct {
+		Status string
+		Pake   []byte
+		Box    []byte
+	}
 	err = call(ctx, seed, peer.Credentials{}, http.MethodGet, "/v1/join-requests/"+id, nil,
 		map[string]string{"X-Request-Secret": secret}, &out)
-	return out.Status, out.Invite, out.Proof, err
+	return out.Status, out.Pake, out.Box, err
 }
 
 type httpError struct {

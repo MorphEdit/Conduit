@@ -40,11 +40,14 @@ Security fixes are released for the latest version. Please upgrade before report
   admin passwords from one address lock that address out for 15 minutes.
 - Invite codes are single-use and expire after 24 hours. Treat them like passwords.
 - LAN joins are proven both ways with the pairing code: it is shown only on the new site's dashboard (only to
-  its admin when `CONDUIT_ADMIN_PASSWORD` is set) and never sent over the network itself. The new site sends a
-  commitment to it with its request; the admin types the code when approving, and the approving site makes an
-  invite only if it matches that request (five wrong codes close the request). The invite works only for that
-  site name, and the new site accepts only an approval proven with the code. So a fake site on the LAN can
-  neither take over a join nor get itself approved under a real site's name. The dashboard shows each
+  its admin when `CONDUIT_ADMIN_PASSWORD` is set) and never sent over the network itself. The code is the
+  password of a PAKE (CPace): the new site sends its half of the exchange with its request, the admin types the
+  code when approving, and the approving site seals the invite under the key the exchange derives. Only a site
+  that knows the code can open it, and nothing sent lets anyone test guesses offline: a fake site gets one guess
+  per request, and the new site waits longer after each failed approval. The exchange is bound to the new
+  site's name and to the approving site's certificate, and the invite works only for that site name. So a fake
+  site on the LAN can neither take over a join, relay it, nor get itself approved under a real site's name. A
+  mistyped code is not caught on the approving site: the new site shows a fresh code and asks again. The dashboard shows each
   request's IP address. On a site without an admin password the code is shown only to a browser on that
   machine itself and in Conduit's log. Set an admin password on new sites too; on an untrusted LAN, invite
   codes are still the safest way in.

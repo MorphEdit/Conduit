@@ -9,114 +9,101 @@ import (
 	"testing"
 )
 
-func TestPairingProof(t *testing.T) {
-	const fp = "ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-	proof := PairingProof("123 456", "req1", fp, "cdt1_x")
+const (
+	seedFP = "ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	fakeFP = "00cdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+)
 
-	if !ProofMatches(proof, "123456", "req1", fp, "cdt1_x") {
-		t.Fatal("the right code must prove the approval (spaces and fingerprint case do not matter)")
+func TestPairingOpensWithTheRightCode(t *testing.T) {
+	msg, st, err := PairingStart("123 456", "branch", seedFP)
+	if err != nil {
+		t.Fatal(err)
 	}
-	bad := []struct{ name, code, req, fp, invite string }{
-		{"wrong code", "123457", "req1", fp, "cdt1_x"},
-		{"another request", "123456", "req2", fp, "cdt1_x"},
-		{"another approving site", "123456", "req1", "00" + fp[2:], "cdt1_x"},
-		{"swapped invite", "123456", "req1", fp, "cdt1_y"},
+	reply, box, err := PairingSeal("123456", "branch", seedFP, msg, "req1", "cdt1_x")
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, c := range bad {
-		if ProofMatches(proof, c.code, c.req, c.fp, c.invite) {
-			t.Errorf("%s: proof must not match", c.name)
-		}
-	}
-	if ProofMatches("", "123456", "req1", fp, "cdt1_x") {
-		t.Error("an approval without a proof (older or fake site) must not be accepted")
-	}
-	if ProofMatches(PairingProof("", "req1", fp, "x"), "", "req1", fp, "x") {
-		t.Error("an empty code must never match")
+	invite, err := PairingOpen(st, reply, box, "req1")
+	if err != nil || invite != "cdt1_x" {
+		t.Fatalf("the right code must open the invite (spaces and fingerprint case do not matter): %q %v", invite, err)
 	}
 }
 
-func TestPairingCommit(t *testing.T) {
-	h := HashSecret("0123456789abcdef")
-	c := PairingCommit("654 321", h)
-	if !CommitMatches(c, "654321", h) {
-		t.Fatal("the code shown on the site must match its commit")
+func TestPairingRefusesEverythingElse(t *testing.T) {
+	bad := []struct{ name, code, node, fp, req string }{
+		{"wrong code", "123457", "branch", seedFP, "req1"},
+		{"another site name", "123456", "shop", seedFP, "req1"},
+		// A fake site in the middle relays the request to the real one: the
+		// new site paired with the fake site's certificate.
+		{"another approving site", "123456", "branch", fakeFP, "req1"},
+		{"another request", "123456", "branch", seedFP, "req2"},
 	}
-	if CommitMatches(c, "654322", h) || CommitMatches(c, "654321", HashSecret("another secret")) {
-		t.Error("another code or another request must not match")
+	for _, c := range bad {
+		msg, st, _ := PairingStart("123456", "branch", seedFP)
+		reply, box, err := PairingSeal(c.code, c.node, c.fp, msg, c.req, "cdt1_x")
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if invite, err := PairingOpen(st, reply, box, "req1"); !errors.Is(err, ErrBadPairing) || invite != "" {
+			t.Errorf("%s: opened %q, err %v", c.name, invite, err)
+		}
 	}
-	if CommitMatches("", "654321", h) || CommitMatches(PairingCommit("", h), "", h) {
-		t.Error("an empty commit or code must never match")
+	_, st, _ := PairingStart("123456", "branch", seedFP)
+	if _, err := PairingOpen(st, nil, nil, "req1"); !errors.Is(err, ErrBadPairing) {
+		t.Error("an approval without a reply (older or fake site) must not be accepted")
+	}
+	if _, _, err := PairingStart("", "branch", seedFP); err == nil {
+		t.Error("an empty code must never be used")
+	}
+	if _, _, err := PairingSeal("12", "branch", seedFP, []byte("x"), "req1", "cdt1_x"); err == nil {
+		t.Error("a code that is not 6 digits is refused")
 	}
 }
 
 func TestRequestsApproveWithCode(t *testing.T) {
 	const secret = "0123456789abcdef"
+	msg, st, _ := PairingStart("654321", "branch", seedFP)
 	r := NewRequests()
-	id, err := r.Add("10.0.0.5", "branch", "https://branch:7443", PairingCommit("654321", HashSecret(secret)), secret)
+	id, err := r.Add("10.0.0.5", "branch", "https://branch:7443", msg, secret)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.Check(id, "12"); err == nil {
-		t.Error("a code that is not 6 digits is refused")
+	if site, err := r.Site(id); err != nil || site != "branch" {
+		t.Fatalf("site %q, err %v", site, err)
 	}
-	if _, err := r.Check(id, "111111"); !errors.Is(err, ErrCodeMismatch) {
-		t.Errorf("a code other than the one shown on the site is refused: got %v", err)
-	}
-	if err := r.Approve(id, "111111", "cdt1_inv", "fp"); !errors.Is(err, ErrCodeMismatch) {
-		t.Errorf("approve must check the code too: got %v", err)
-	}
-	site, err := r.Check(id, "654 321")
-	if err != nil || site != "branch" {
-		t.Fatalf("the right code: site %q, err %v", site, err)
-	}
-	if err := r.Approve(id, "654321", "cdt1_inv", "fp"); err != nil {
+	if err := r.Approve(id, "654 321", "cdt1_inv", seedFP); err != nil {
 		t.Fatal(err)
 	}
-	status, invite, proof, ok := r.Poll(id, secret)
-	if !ok || status != "approved" || invite != "cdt1_inv" || !ProofMatches(proof, "654321", id, "fp", "cdt1_inv") {
-		t.Fatalf("poll = %q %q %q %v", status, invite, proof, ok)
+	status, reply, box, ok := r.Poll(id, secret)
+	if !ok || status != "approved" {
+		t.Fatalf("poll = %q %v", status, ok)
+	}
+	if invite, err := PairingOpen(st, reply, box, id); err != nil || invite != "cdt1_inv" {
+		t.Fatalf("open = %q %v", invite, err)
+	}
+	if _, _, _, ok := r.Poll(id, "wrong secret"); ok {
+		t.Error("another secret must not see the request")
 	}
 
-	// Older sites sent no commit: nothing could tell them from a fake site.
-	if _, err := r.Add("10.0.0.7", "shop", "https://shop:7443", "", "aaaaaaaaaaaaaaaa"); !errors.Is(err, ErrNoPairingProof) {
-		t.Errorf("request without a commit: got %v", err)
+	// Older sites sent no pairing exchange: nothing could tell them from a fake site.
+	if _, err := r.Add("10.0.0.7", "shop", "https://shop:7443", nil, "aaaaaaaaaaaaaaaa"); !errors.Is(err, ErrNoPairingProof) {
+		t.Errorf("request without a pairing exchange: got %v", err)
 	}
 }
 
 // A fake site on the LAN asks to join under a real site's name. The admin
-// types the code shown on the real site: the fake request must not get the
-// invite, and the real one must.
+// types the code shown on the real site into the fake request: the fake site
+// must not be able to open the invite.
 func TestFakeSiteSameNameGetsNoInvite(t *testing.T) {
-	const realSecret, fakeSecret = "real-secret-0123456789", "fake-secret-0123456789"
+	const fakeSecret = "fake-secret-0123456789"
+	fakeMsg, fakeSt, _ := PairingStart("000000", "branch", seedFP) // its guess
 	r := NewRequests()
-	fake, _ := r.Add("10.0.0.66", "branch", "https://evil:7443", PairingCommit("000000", HashSecret(fakeSecret)), fakeSecret)
-	real, _ := r.Add("10.0.0.5", "branch", "https://branch:7443", PairingCommit("482915", HashSecret(realSecret)), realSecret)
-
-	if _, err := r.Check(fake, "482915"); !errors.Is(err, ErrCodeMismatch) {
-		t.Fatalf("fake request accepted the real site's code: %v", err)
+	fake, _ := r.Add("10.0.0.66", "branch", "https://evil:7443", fakeMsg, fakeSecret)
+	if err := r.Approve(fake, "482915", "cdt1_inv", seedFP); err != nil {
+		t.Fatal(err)
 	}
-	if err := r.Approve(fake, "482915", "cdt1_inv", "fp"); err == nil {
-		t.Fatal("fake request was approved")
-	}
-	if status, invite, _, _ := r.Poll(fake, fakeSecret); status != "pending" || invite != "" {
-		t.Fatalf("fake request got %q %q", status, invite)
-	}
-	if _, err := r.Check(real, "482915"); err != nil {
-		t.Fatalf("real request: %v", err)
-	}
-}
-
-func TestRequestRejectedAfterTooManyWrongCodes(t *testing.T) {
-	const secret = "0123456789abcdef"
-	r := NewRequests()
-	id, _ := r.Add("10.0.0.5", "branch", "https://branch:7443", PairingCommit("654321", HashSecret(secret)), secret)
-	for i := 0; i < maxCodeMisses; i++ {
-		r.Check(id, "000000")
-	}
-	if _, err := r.Check(id, "654321"); err == nil {
-		t.Fatal("the request should be closed after too many wrong codes")
-	}
-	if status, _, _, _ := r.Poll(id, secret); status != "rejected" {
-		t.Fatalf("status = %q, want rejected", status)
+	_, reply, box, _ := r.Poll(fake, fakeSecret)
+	if invite, err := PairingOpen(fakeSt, reply, box, fake); err == nil {
+		t.Fatalf("fake request opened the invite: %q", invite)
 	}
 }
