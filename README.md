@@ -121,6 +121,7 @@ All settings are environment variables; a YAML file (`/etc/conduit/conduit.yaml`
 | `CONDUIT_NODE_ID` | host name | Site name (a–z, 0–9, _) |
 | `CONDUIT_ADVERTISE` | `https://<host>:7443` | Address other sites use to reach this one |
 | `CONDUIT_LISTEN` | `:7420` | Dashboard (LAN discovery uses UDP 7420) |
+| `CONDUIT_DASHBOARD_HOSTS` | — | Extra host names for the dashboard, comma-separated (e.g. your reverse proxy's name); others are refused |
 | `CONDUIT_PEER_LISTEN` | `:7443` | HTTPS port for other sites |
 | `CONDUIT_DISCOVERY` | `true` | Find / announce on the LAN |
 | `CONDUIT_CONFIGURE_POSTGRES` | `false` | Let Conduit change Postgres settings without asking |

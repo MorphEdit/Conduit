@@ -14,6 +14,7 @@ Conduit reads an optional YAML file (`-config`, default `/etc/conduit/conduit.ya
 | `CONDUIT_NODE_ID` | host name | Site name: lowercase letters, digits, `_` |
 | `CONDUIT_ADVERTISE` | `https://<host>:7443` | URL other sites use to reach this one |
 | `CONDUIT_LISTEN` | `:7420` | Dashboard address |
+| `CONDUIT_DASHBOARD_HOSTS` | — | Extra host names the dashboard answers to, comma-separated. IP addresses, `localhost`, the machine name and the advertised name always work; any other name is refused (protects against DNS rebinding) |
 | `CONDUIT_PEER_LISTEN` | `:7443` | HTTPS address for other sites |
 | `CONDUIT_DISCOVERY` | `true` | Announce / listen on the LAN (UDP 7420) |
 | `CONDUIT_CONFIGURE_POSTGRES` | `false` | Change `wal_level` / `track_commit_timestamp` without asking. Otherwise the dashboard asks an admin first. |

@@ -160,6 +160,7 @@ CONDUIT_DATABASE=postgres://… CONDUIT_BOOTSTRAP=true CONDUIT_ADMIN_PASSWORD=�
 | `CONDUIT_NODE_ID` | ชื่อเครื่อง | ชื่อไซต์ (a-z 0-9 _) |
 | `CONDUIT_ADVERTISE` | `https://<ชื่อเครื่อง>:7443` | ที่อยู่ที่ไซต์อื่นใช้ติดต่อ |
 | `CONDUIT_LISTEN` | `:7420` | dashboard (LAN discovery ใช้ UDP 7420) |
+| `CONDUIT_DASHBOARD_HOSTS` | — | ชื่อโฮสต์เพิ่มเติมที่ dashboard ยอมรับ (IP, `localhost`, ชื่อเครื่อง และชื่อใน advertise ใช้ได้เสมอ ชื่ออื่นถูกปฏิเสธ กัน DNS rebinding) |
 | `CONDUIT_PEER_LISTEN` | `:7443` | พอร์ต HTTPS ที่ไซต์อื่นใช้ |
 | `CONDUIT_DISCOVERY` | `true` | ค้นหา/ประกาศตัวในวง LAN |
 

@@ -116,6 +116,7 @@ docker run -d --name conduit --restart unless-stopped -p 7420:7420 -p 7443:7443 
 | `CONDUIT_NODE_ID` | ชื่อเครื่อง | ชื่อไซต์ (a–z, 0–9, _) |
 | `CONDUIT_ADVERTISE` | `https://<ชื่อเครื่อง>:7443` | ที่อยู่ที่ไซต์อื่นใช้ติดต่อ |
 | `CONDUIT_LISTEN` | `:7420` | dashboard (ค้นหาใน LAN ใช้ UDP 7420) |
+| `CONDUIT_DASHBOARD_HOSTS` | — | ชื่อโฮสต์เพิ่มเติมที่ใช้เปิด dashboard คั่นด้วย `,` (เช่นชื่อของ reverse proxy) ชื่ออื่นจะถูกปฏิเสธ |
 | `CONDUIT_PEER_LISTEN` | `:7443` | พอร์ต HTTPS สำหรับไซต์อื่น |
 | `CONDUIT_DISCOVERY` | `true` | ค้นหาและประกาศตัวในวง LAN |
 | `CONDUIT_CONFIGURE_POSTGRES` | `false` | ให้ Conduit แก้ค่า Postgres ได้เองโดยไม่ต้องถาม |

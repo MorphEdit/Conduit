@@ -28,7 +28,12 @@ type Config struct {
 	// sites use.
 	Listen     string `yaml:"listen"`
 	PeerListen string `yaml:"peer_listen"`
-	Database   string `yaml:"database"`
+	// DashboardHosts are extra host names the dashboard answers to (e.g. a
+	// reverse proxy's public name). IP addresses, localhost, this machine's
+	// name and the advertised name always work; other names are refused
+	// against DNS rebinding.
+	DashboardHosts []string `yaml:"dashboard_hosts"`
+	Database       string   `yaml:"database"`
 	// Advertise is the HTTPS URL other sites use to reach this one.
 	Advertise string `yaml:"advertise"`
 
@@ -129,6 +134,9 @@ func (c *Config) applyEnv() {
 	str("CONDUIT_ADVERTISE", &c.Advertise)
 	str("CONDUIT_JOIN", &c.Join)
 	str("CONDUIT_ADMIN_PASSWORD", &c.AdminPassword)
+	if v := os.Getenv("CONDUIT_DASHBOARD_HOSTS"); v != "" {
+		c.DashboardHosts = strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ' ' })
+	}
 	boolean("CONDUIT_BOOTSTRAP", &c.Bootstrap)
 	boolean("CONDUIT_DISCOVERY", &c.Discovery)
 	boolean("CONDUIT_CONFIGURE_POSTGRES", &c.ConfigurePostgres)

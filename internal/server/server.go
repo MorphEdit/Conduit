@@ -93,7 +93,7 @@ func (s *Server) DashboardHandler() http.Handler {
 
 	ui, _ := fs.Sub(uiFiles, "ui")
 	mux.Handle("GET /", http.FileServerFS(ui))
-	return secureHeaders(mux)
+	return s.checkHost(secureHeaders(mux))
 }
 
 // dashboardCSP lets the dashboard run only its own scripts (and its inline

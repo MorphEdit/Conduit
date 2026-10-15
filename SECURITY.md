@@ -36,7 +36,9 @@ Security fixes are released for the latest version. Please upgrade before report
 - Conduit does not change Postgres settings unless an admin allows it (or `CONDUIT_CONFIGURE_POSTGRES=true`).
 - The dashboard (port 7420) is plain HTTP and meant for your LAN. Protect it with
   `CONDUIT_ADMIN_PASSWORD`, and put a TLS reverse proxy in front if you expose it further (or set
-  `CONDUIT_LISTEN=127.0.0.1:7420`). Conduit warns at start when it listens on every interface. Ten wrong
+  `CONDUIT_LISTEN=127.0.0.1:7420`). Conduit warns at start when it listens on every interface. The dashboard answers only
+  to IP addresses, `localhost`, the machine's own and advertised names and `CONDUIT_DASHBOARD_HOSTS`, so a web page
+  cannot reach it through DNS rebinding. It sends a strict Content-Security-Policy. Ten wrong
   admin passwords from one address lock that address out for 15 minutes.
 - Invite codes are single-use and expire after 24 hours. Treat them like passwords.
 - LAN joins are proven both ways with the pairing code: it is shown only on the new site's dashboard (only to
