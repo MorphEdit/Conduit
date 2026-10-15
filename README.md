@@ -101,7 +101,7 @@ docker run -d --name conduit --restart unless-stopped -p 7420:7420 -p 7443:7443 
 
 | Where is the new site? | What you do |
 |---|---|
-| Same LAN | Start it. Approve the join request on a running site's dashboard by typing the pairing code the new site shows (on its own dashboard with its admin password, or in its log). |
+| Same LAN | Start it. Approve the join request on a running site's dashboard by typing the pairing code the new site shows (on its own dashboard with its admin password; in its log only when it has no admin password). |
 | Anywhere else | Click **＋ Add site** on a dashboard (or run `docker exec conduit conduit invite`) and give the code to the new site: `-e CONDUIT_JOIN=cdt1_…` or paste it on its dashboard. |
 | Existing Postgres without the right settings | The dashboard asks first: click **Allow** (or set `CONDUIT_CONFIGURE_POSTGRES=true`), then **restart Postgres once**. |
 

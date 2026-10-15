@@ -51,7 +51,7 @@ Security fixes are released for the latest version. Please upgrade before report
   site on the LAN can neither take over a join, relay it, nor get itself approved under a real site's name. A
   mistyped code is not caught on the approving site: the new site shows a fresh code and asks again. The dashboard shows each
   request's IP address. On a site without an admin password the code is shown only to a browser on that
-  machine itself and in Conduit's log. Set an admin password on new sites too; on an untrusted LAN, invite
+  machine itself and in Conduit's log; with an admin password it is never written to the log. Set an admin password on new sites too; on an untrusted LAN, invite
   codes are still the safest way in.
 
 ---

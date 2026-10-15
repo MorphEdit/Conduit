@@ -96,7 +96,7 @@ docker run -d --name conduit --restart unless-stopped -p 7420:7420 -p 7443:7443 
 
 | ไซต์ใหม่อยู่ที่ไหน | ต้องทำอะไร |
 |---|---|
-| วง LAN เดียวกัน | เปิดเครื่อง แล้วกดอนุมัติที่ dashboard ของไซต์เดิม โดยพิมพ์รหัสจับคู่ที่ไซต์ใหม่แสดง (ดูที่ dashboard ของไซต์ใหม่ด้วยรหัส admin ของมัน หรือใน log) |
+| วง LAN เดียวกัน | เปิดเครื่อง แล้วกดอนุมัติที่ dashboard ของไซต์เดิม โดยพิมพ์รหัสจับคู่ที่ไซต์ใหม่แสดง (ดูที่ dashboard ของไซต์ใหม่ด้วยรหัส admin ของมัน ถ้าไม่ได้ตั้งรหัส admin จะดูใน log ได้) |
 | ต่างสถานที่ | กด **＋ เพิ่มไซต์** บน dashboard (หรือ `docker exec conduit conduit invite`) แล้วเอารหัสไปใส่ที่ไซต์ใหม่: `-e CONDUIT_JOIN=cdt1_…` หรือแปะในหน้า dashboard ของมัน |
 | Postgres เดิมที่ยังตั้งค่าไม่ครบ | dashboard จะถามก่อน: กด **อนุญาตให้ตั้งค่า** (หรือตั้ง `CONDUIT_CONFIGURE_POSTGRES=true`) แล้ว **restart Postgres 1 ครั้ง** |
 

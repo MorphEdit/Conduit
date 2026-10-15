@@ -47,11 +47,20 @@ func (r *Runtime) join(ctx context.Context, st *store.Store) (*cluster.Identity,
 	pairing := &Pairing{Code: pairingCode(), Status: "searching"}
 	r.set(func() { r.pairing = pairing })
 	r.setPhase(PhaseWaitingJoin, "")
+	// The log is the only way to read the code on a site without an admin
+	// password. With one, the code stays on the dashboard: logs are often
+	// collected and readable by more people than the admin.
+	logCode := func(code string) string {
+		if cfg.AdminPassword != "" {
+			return "(shown on this site's dashboard)"
+		}
+		return code
+	}
 
 	var lan *cluster.Listener
 	if cfg.Discovery && code == "" {
 		lan = cluster.Listen(ctx, r.Log)
-		r.Log.Info("waiting to join: approve this site on any running site's dashboard, or paste an invite", "pairing_code", pairing.Code)
+		r.Log.Info("waiting to join: approve this site on any running site's dashboard, or paste an invite", "pairing_code", logCode(pairing.Code))
 	}
 	reqSecret := randHex(16)
 	var reqID string
@@ -78,7 +87,7 @@ func (r *Runtime) join(ctx context.Context, st *store.Store) (*cluster.Identity,
 					if id, st, err := r.requestJoin(ctx, t, r.View().Pairing.Code, reqSecret); err == nil {
 						reqID, seed, pake = id, t, st
 						r.set(func() { pairing.SeedID, pairing.Status = b.ID, "requested" })
-						r.Log.Info("asked to join; approve it on the dashboard", "site", b.ID, "pairing_code", pairing.Code)
+						r.Log.Info("asked to join; approve it on the dashboard", "site", b.ID, "pairing_code", logCode(pairing.Code))
 					} else {
 						r.setErr(err)
 					}
@@ -100,7 +109,7 @@ func (r *Runtime) join(ctx context.Context, st *store.Store) (*cluster.Identity,
 					quietUntil = time.Now().Add(min(20*time.Second<<min(badApprovals-1, 5), 10*time.Minute))
 					next := pairingCode()
 					r.set(func() { pairing.Code, pairing.Status = next, "bad_proof" })
-					r.Log.Warn("join approval did not prove the pairing code; ignored it", "site", pairing.SeedID, "new_pairing_code", next)
+					r.Log.Warn("join approval did not prove the pairing code; ignored it", "site", pairing.SeedID, "new_pairing_code", logCode(next))
 				case err != nil:
 					reqID, pake = "", nil // the other site restarted; ask again
 				case status == "approved":
