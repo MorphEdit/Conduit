@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased — security fixes
+
+Upgrade every site: LAN joins need both sites on this version (or join with an invite code).
+
+- Security: LAN pairing could be broken. v0.4 sent an HMAC of the 6-digit code with the request, and a fake
+  site answering the LAN broadcast could brute-force the code from it offline in seconds, then make the new
+  site join a fake cluster, or join the real cluster under the new site's name. The code is now the password
+  of a PAKE (CPace): the approving site seals the invite under the derived key, only the site showing the code
+  can open it, and nothing sent allows an offline guess. The exchange is bound to the new site's name and the
+  approving site's certificate. A mistyped code is noticed on the new site, which shows a fresh code and asks
+  again, waiting longer after each failure
+- Security: a member site could run script on other sites' dashboards through a few unescaped numbers in its
+  status. They are forced to numbers now, and the dashboard sends a strict Content-Security-Policy
+- Security: the dashboard refuses Host names it does not know (DNS rebinding). Add a reverse proxy's name
+  with `CONDUIT_DASHBOARD_HOSTS`
+- Security: the pairing code is no longer written to the log when an admin password is set
+- Security: the table structure a new site copies is checked statement by statement and run through
+  Postgres directly instead of `psql` (whose meta-commands could run shell commands); `COPY`, `DO`,
+  `ALTER SYSTEM`, extensions, roles, `SECURITY DEFINER` and C/untrusted-language functions stop the copy
+- Docker image on Alpine 3.22
+
 ## v0.4.0 — security and consistency fixes, 3D dashboard
 
 Upgrade every site: LAN joins need both sites on this version, and delete markers are kept until every
