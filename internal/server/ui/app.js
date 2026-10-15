@@ -7,7 +7,10 @@ import { createScene } from './scene3d.js';
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
-const fmt = n => (n ?? 0).toLocaleString('th-TH');
+// Status comes from other sites too: numbers are forced to numbers before
+// they reach innerHTML, so a site cannot slip markup into this dashboard.
+const int = v => Number.isFinite(+v) ? +v : 0;
+const fmt = n => int(n).toLocaleString('th-TH');
 const rel = iso => {
   if (!iso) return '—';
   const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
@@ -34,7 +37,7 @@ function normalize(m) {
     const st = n.status || {};
     if (st.sequences) known[n.id] = st.sequences;
     const sq = known[n.id];
-    return { id: n.id, self: !!n.self, up: !!n.reachable, st, idx: i, offset: sq ? sq.offset : null, step: sq ? sq.step : null, skew: n.skew_ms || 0 };
+    return { id: n.id, self: !!n.self, up: !!n.reachable, st, idx: i, offset: sq ? int(sq.offset) : null, step: sq ? int(sq.step) : null, skew: n.skew_ms || 0 };
   });
   const byId = Object.fromEntries(nodes.map(n => [n.id, n]));
   const rank = { ok: 0, busy: 1, warn: 2, down: 3 };
@@ -144,7 +147,7 @@ function renderDetail(m) {
     const inbox = (n.st.inbox || []).find(x => x.origin === other);
     const p = out && out.peer, state = out ? out.state : 'down';
     const meta = !n.up ? 'ไม่มีข้อมูล' :
-      `ส่งแล้ว #${p ? p.acked_seq : 0} · ค้าง ${p ? fmt(p.backlog) : 0} · รับแล้ว #${inbox ? inbox.applied_seq : 0}<br>ส่งสำเร็จล่าสุด ${rel(p && p.last_ok)}`;
+      `ส่งแล้ว #${p ? int(p.acked_seq) : 0} · ค้าง ${p ? fmt(p.backlog) : 0} · รับแล้ว #${inbox ? int(inbox.applied_seq) : 0}<br>ส่งสำเร็จล่าสุด ${rel(p && p.last_ok)}`;
     const err = p && p.last_error ? `<span class="err" title="${esc(p.last_error)}">${esc(p.last_error)}</span>` : '';
     return `<li><span class="state ${state}" role="img" aria-label="${stateText[state]}"></span><span class="route">${esc(n.id)} ⇄ ${esc(other)}</span><span class="meta">${meta}${err}</span></li>`;
   });

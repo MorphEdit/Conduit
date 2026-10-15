@@ -8,14 +8,17 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"embed"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strconv"
 	"sync"
 	"time"
@@ -90,7 +93,35 @@ func (s *Server) DashboardHandler() http.Handler {
 
 	ui, _ := fs.Sub(uiFiles, "ui")
 	mux.Handle("GET /", http.FileServerFS(ui))
-	return mux
+	return secureHeaders(mux)
+}
+
+// dashboardCSP lets the dashboard run only its own scripts (and its inline
+// import map, by hash): if a value from another site ever slipped through as
+// markup, the browser would still not run it.
+var dashboardCSP = func() string {
+	page, _ := uiFiles.ReadFile("ui/index.html")
+	scripts := "'self'"
+	for _, m := range inlineScript.FindAllSubmatch(page, -1) {
+		if len(m[1]) == 0 {
+			continue // <script src=...></script>
+		}
+		sum := sha256.Sum256(m[1])
+		scripts += " 'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"
+	}
+	return "default-src 'self'; script-src " + scripts + "; img-src 'self' data:; object-src 'none'; " +
+		"base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+}()
+
+var inlineScript = regexp.MustCompile(`(?s)<script[^>]*>(.*?)</script>`)
+
+func secureHeaders(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Security-Policy", dashboardCSP)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		h.ServeHTTP(w, r)
+	})
 }
 
 // ---------- auth ----------

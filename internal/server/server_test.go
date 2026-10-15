@@ -5,6 +5,9 @@
 package server
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -25,5 +28,21 @@ func TestClockSkew(t *testing.T) {
 		if got := clockSkew(c.remote, start, end); got != c.want {
 			t.Errorf("clockSkew(%v) = %v, want %v", c.remote.Sub(start), got, c.want)
 		}
+	}
+}
+
+func TestDashboardSecurityHeaders(t *testing.T) {
+	// The inline import map must be allowed by hash, nothing else inline.
+	if n := strings.Count(dashboardCSP, "'sha256-"); n != 1 {
+		t.Fatalf("CSP should allow exactly the import map by hash, got %d hashes: %s", n, dashboardCSP)
+	}
+	if strings.Contains(dashboardCSP, "unsafe-inline") || strings.Contains(dashboardCSP, "unsafe-eval") {
+		t.Fatalf("CSP must not allow inline or eval'd scripts: %s", dashboardCSP)
+	}
+	h := secureHeaders(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+	if rec.Header().Get("Content-Security-Policy") != dashboardCSP || rec.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("headers = %v", rec.Header())
 	}
 }
