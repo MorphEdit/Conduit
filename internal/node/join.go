@@ -59,7 +59,9 @@ func (r *Runtime) join(ctx context.Context, st *store.Store) (*cluster.Identity,
 		lan = cluster.Listen(ctx, r.Log)
 		r.Log.Info("waiting to join: approve this site on any running site's dashboard, or paste an invite", "pairing_code", logCode(pairing.Code))
 	}
-	reqSecret := randHex(16)
+	// A fresh secret per request: a fake site that saw one cannot use it to
+	// poll (and so cancel) the request this site makes to the real one.
+	var reqSecret string
 	var reqID string
 	var seed peer.Target
 	var pake *cpace.State
@@ -81,6 +83,7 @@ func (r *Runtime) join(ctx context.Context, st *store.Store) (*cluster.Identity,
 			if reqID == "" {
 				if b, ok := lan.Best(); ok && b.FP != "" {
 					t := peer.Target{URL: b.URL, Fingerprint: b.FP}
+					reqSecret = randHex(16)
 					if id, st, err := r.requestJoin(ctx, t, r.View().Pairing.Code, reqSecret); err == nil {
 						reqID, seed, pake = id, t, st
 						r.set(func() { pairing.SeedID, pairing.Status = b.ID, "requested" })
