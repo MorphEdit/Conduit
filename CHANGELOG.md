@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — security fixes
+## v0.5.0 — security fixes
 
 Upgrade every site: LAN joins need both sites on this version (or join with an invite code).
 
@@ -10,7 +10,8 @@ Upgrade every site: LAN joins need both sites on this version (or join with an i
   of a PAKE (CPace): the approving site seals the invite under the derived key, only the site showing the code
   can open it, and nothing sent allows an offline guess. The exchange is bound to the new site's name and the
   approving site's certificate. A mistyped code is noticed on the new site, which shows a fresh code and asks
-  again, waiting longer after each failure
+  again, waiting longer after each failure. Each request uses a fresh secret, so a fake site that saw one
+  cannot cancel the request made to the real site
 - Security: a member site could run script on other sites' dashboards through a few unescaped numbers in its
   status. They are forced to numbers now, and the dashboard sends a strict Content-Security-Policy
 - Security: the dashboard refuses Host names it does not know (DNS rebinding). Add a reverse proxy's name
