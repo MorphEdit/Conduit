@@ -84,7 +84,7 @@ docker build -t conduit .
 ```
 
 (Without Docker: install Go 1.25 and run `go build -o conduit ./cmd/conduit`.
-Copying table structure to new sites also needs `pg_dump`/`psql` 16, which the Docker image includes.)
+Handing the table structure to new sites also needs `pg_dump` 16, which the Docker image includes.)
 
 **First site** — founds the cluster:
 
@@ -133,7 +133,7 @@ More (owner-only tables, retention…) in [docs/configuration.md](docs/configura
 - PostgreSQL **16+** (`wal_level=logical`, `track_commit_timestamp=on` — Conduit sets these for you once you allow it)
 - A superuser for Conduit
 - Every table needs a primary key; the schema must be the same on every site
-  (new, empty sites get it copied automatically — needs `pg_dump`/`psql` 16, included in the Docker image)
+  (new, empty sites get it copied automatically — needs `pg_dump` 16 on the site it copies from, included in the Docker image)
 - Clocks in sync (NTP)
 - Every site must be able to reach every other site on port 7443 (a full mesh): a site only sends its
   own changes and never relays another site's, so if branch can reach office but not host, branch

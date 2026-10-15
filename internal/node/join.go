@@ -14,24 +14,21 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os/exec"
-	"regexp"
 	"strings"
 	"time"
 
 	"filippo.io/cpace"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/MorphEdit/conduit/internal/apply"
 	"github.com/MorphEdit/conduit/internal/cluster"
 	"github.com/MorphEdit/conduit/internal/peer"
-	"github.com/MorphEdit/conduit/internal/pgcli"
 	"github.com/MorphEdit/conduit/internal/snapshot"
 	"github.com/MorphEdit/conduit/internal/store"
 )
 
 const peerTimeout = 15 * time.Second
-
-var createSchema = regexp.MustCompile(`(?m)^CREATE SCHEMA (\S+);`)
 
 func randHex(n int) string {
 	b := make([]byte, n)
@@ -275,7 +272,7 @@ func (r *Runtime) finishJoin(ctx context.Context, st *store.Store, id *cluster.I
 		return nil, err
 	}
 	if tables == 0 {
-		if err := retry(ctx, r, func() error { return r.copySchema(ctx, target, creds) }); err != nil {
+		if err := retry(ctx, r, func() error { return r.copySchema(ctx, pool, target, creds) }); err != nil {
 			return nil, err
 		}
 		r.Log.Info("copied table structure", "from", seed.ID)
@@ -295,28 +292,41 @@ func (r *Runtime) finishJoin(ctx context.Context, st *store.Store, id *cluster.I
 	return id, cluster.SaveIdentity(ctx, pool, id)
 }
 
-// copySchema fetches the peer's DDL (pg_dump --schema-only) and runs it here.
-func (r *Runtime) copySchema(ctx context.Context, t peer.Target, creds peer.Credentials) error {
+// copySchema fetches the peer's DDL (pg_dump --schema-only), checks that it
+// is only table structure (see schemaStatements) and runs it here in one
+// transaction, on a connection of its own so its SET commands go with it.
+func (r *Runtime) copySchema(ctx context.Context, pool *pgxpool.Pool, t peer.Target, creds peer.Credentials) error {
 	resp, err := peer.Do(ctx, t, creds, http.MethodGet, "/v1/schema", nil, time.Minute)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	ddl, err := io.ReadAll(resp.Body)
+	ddl, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	if err != nil {
 		return err
 	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("schema from peer: %s: %s", resp.Status, bytes.TrimSpace(ddl))
 	}
-	// The target already has "public"; make every CREATE SCHEMA a no-op if present.
-	ddl = createSchema.ReplaceAll(ddl, []byte("CREATE SCHEMA IF NOT EXISTS $1;"))
-	dbname, env := pgcli.Conn(r.Cfg.Database) // password goes in the environment, not the process list
-	cmd := exec.CommandContext(ctx, "psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", "-d", dbname, "-f", "-")
-	cmd.Env = env
-	cmd.Stdin = bytes.NewReader(ddl)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("apply schema: %v: %s", err, bytes.TrimSpace(out))
+	stmts, err := schemaStatements(string(ddl))
+	if err != nil {
+		return err
 	}
-	return nil
+	c, err := pool.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	conn := c.Hijack()
+	defer conn.Close(context.WithoutCancel(ctx))
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	for _, st := range stmts {
+		if _, err := tx.Exec(ctx, st, pgx.QueryExecModeSimpleProtocol); err != nil {
+			return fmt.Errorf("apply schema: %w (in %.80q)", err, st)
+		}
+	}
+	return tx.Commit(ctx)
 }

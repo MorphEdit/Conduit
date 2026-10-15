@@ -32,7 +32,12 @@ Security fixes are released for the latest version. Please upgrade before report
 - Conflicts are decided by commit time, so keep every site's clock in sync (NTP): a site whose clock runs
   ahead wins every conflict until the others catch up.
 - LAN join requests are accepted only from private addresses, two pending per address.
-- Postgres passwords are passed to `pg_dump`/`psql` through the environment, never on the command line.
+- Postgres passwords are passed to `pg_dump` through the environment, never on the command line.
+- A new, empty site copies the table structure from a member site. That script is not run through `psql`
+  (whose meta-commands run shell commands): it is split into statements and run in one transaction, and anything
+  that is not table structure (`COPY`, `DO`, `ALTER SYSTEM`, extensions, roles, event triggers, `SECURITY DEFINER`
+  or functions in languages other than sql/plpgsql) stops the copy. Functions and triggers in that structure are
+  still trusted code from a member site, like its data.
 - Conduit does not change Postgres settings unless an admin allows it (or `CONDUIT_CONFIGURE_POSTGRES=true`).
 - The dashboard (port 7420) is plain HTTP and meant for your LAN. Protect it with
   `CONDUIT_ADMIN_PASSWORD`, and put a TLS reverse proxy in front if you expose it further (or set

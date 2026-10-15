@@ -242,7 +242,10 @@ test bench มี 3 ไซต์ แต่ละไซต์มี network ข�
 
 - Postgres 16+ พร้อม `wal_level=logical` และ `track_commit_timestamp=on` (ต้อง restart)
 - user ของ Conduit ต้องเป็น superuser (publication, slot, replication origin, `session_replication_role`, `ALTER SYSTEM`)
-- Conduit ใช้ `pg_dump`/`psql` เวอร์ชัน 16 คัดลอกตาราง ถ้า Postgres เป็นเวอร์ชันอื่น ให้สร้างตารางเองก่อนเข้าร่วม
+- Conduit ใช้ `pg_dump` เวอร์ชัน 16 คัดลอกตาราง ถ้า Postgres เป็นเวอร์ชันอื่น ให้สร้างตารางเองก่อนเข้าร่วม
+- ไซต์ใหม่ไม่ส่งโครงสร้างตารางที่ได้รับให้ `psql` แต่แยกเป็นคำสั่งแล้วรันผ่าน Postgres โดยตรงใน transaction เดียว
+  รับเฉพาะคำสั่งสร้าง/แก้โครงสร้าง (CREATE/ALTER TABLE, INDEX, VIEW, FUNCTION แบบ sql/plpgsql ฯลฯ)
+  ถ้าเจอ psql meta-command, `COPY`, `DO`, `ALTER SYSTEM`, `CREATE EXTENSION`, role, `SECURITY DEFINER` หรือภาษาอื่น จะหยุดคัดลอก
 - ทุกตารางต้องมี primary key
 - schema ต้องเหมือนกันทุกไซต์ Conduit ไม่ซิงก์ DDL และไม่ซิงก์ `TRUNCATE` ให้แก้ schema ทุกไซต์เอง
   แล้ว restart Conduit (sequence ของตารางใหม่จะถูกจัดให้ตอนเริ่ม)
